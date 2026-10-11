@@ -8,12 +8,37 @@ import json
 import os
 import zlib
 import urllib.parse
+import smtplib
+from email.mime.text import MIMEText
+import random
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+
+# ==========================================
+# EMAIL SENDER SETUP (OTP)
+# ==========================================
+SENDER_EMAIL = "placement.gctfsd@gmail.com"
+APP_PASSWORD = "jryv lxng zhmb fpvv"
+
+def send_otp_email(to_email, otp_code):
+    try:
+        msg = MIMEText(f"Assalam-o-Alaikum,\n\nIPO Portal password reset OTP: {otp_code}\n\nYeh code kisi ko mat dein.")
+        msg["Subject"] = "IPO Portal - Password Reset OTP"
+        msg["From"] = SENDER_EMAIL
+        msg["To"] = to_email
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(SENDER_EMAIL, APP_PASSWORD.replace(" ", ""))
+        server.sendmail(SENDER_EMAIL, to_email, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        print("Email error:", e)
+        return False
 
 # ==========================================
 # AUTHENTICATION & LOGIN LOGIC
@@ -37,6 +62,7 @@ if not st.session_state["logged_in"]:
     st.title("🔐 GCT Samanabad - IPO Management System")
     st.info("System access karne ke liye apna username aur password enter karein.")
     
+    # 1. LOGIN FORM
     with st.form("login_box"):
         u_in = st.text_input("Username")
         p_in = st.text_input("Password", type="password")
@@ -51,7 +77,55 @@ if not st.session_state["logged_in"]:
                 st.rerun()
             else:
                 st.error("Ghalat Username ya Password! Dobara koshish karein.")
-    st.stop()  # Is line se aage poora system band rahega jab tak login na ho
+
+    # 2. FORGOT PASSWORD (st.stop se pehle)
+    with st.expander("🔑 Forgot Password?"):
+        reset_user = st.text_input("Apna Username likhein", key="reset_u_input")
+        
+        if st.button("Send Recovery OTP"):
+            conn_r = sqlite3.connect("ipo_management.db")
+            c_r = conn_r.cursor()
+            c_r.execute("SELECT email FROM system_users WHERE username = ?", (reset_user.strip().lower(),))
+            res = c_r.fetchone()
+            
+            if res and res[0]:
+                otp = str(random.randint(100000, 999999))
+                c_r.execute("UPDATE system_users SET otp = ? WHERE username = ?", (otp, reset_user.strip().lower()))
+                conn_r.commit()
+                conn_r.close()
+                
+                if send_otp_email(res[0], otp):
+                    st.success(f"OTP code aapki registered email ({res[0]}) par bhej diya gaya hai!")
+                    st.session_state["otp_sent_to"] = reset_user.strip().lower()
+                else:
+                    st.error("Email send karne mein masla aaya. Internet ya Gmail app password check karein.")
+            else:
+                conn_r.close()
+                st.error("Yeh username mojood nahi ya email link nahi hai.")
+
+        if st.session_state.get("otp_sent_to") == reset_user.strip().lower():
+            entered_otp = st.text_input("Email par aaya hua 6-digit OTP", key="entered_otp")
+            new_password_set = st.text_input("Naya Password", type="password", key="new_password_set")
+            
+            if st.button("Reset Password"):
+                conn_r = sqlite3.connect("ipo_management.db")
+                c_r = conn_r.cursor()
+                c_r.execute("SELECT otp FROM system_users WHERE username = ?", (reset_user.strip().lower(),))
+                db_otp = c_r.fetchone()
+                
+                if db_otp and str(db_otp[0]) == entered_otp.strip():
+                    new_hash = hashlib.sha256(str.encode(new_password_set)).hexdigest()
+                    c_r.execute("UPDATE system_users SET password_hash = ?, otp = NULL WHERE username = ?", (new_hash, reset_user.strip().lower()))
+                    conn_r.commit()
+                    conn_r.close()
+                    st.success("Mubarak! Password update ho gaya. Ab login karein.")
+                    st.session_state["otp_sent_to"] = None
+                else:
+                    conn_r.close()
+                    st.error("Ghalat OTP code enter kiya hai!")
+
+    # 3. Yahan stop hoga login check ke baad
+    st.stop()
 
 # Sidebar par user profile aur logout button
 st.sidebar.markdown(f"👤 **{st.session_state['user_info']['name']}**")

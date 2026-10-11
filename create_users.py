@@ -1,30 +1,25 @@
-import hashlib
 import sqlite3
 
-def make_hash(password):
-    return hashlib.sha256(str.encode(password)).hexdigest()
-
-# Database se connect
 conn = sqlite3.connect("ipo_management.db")
 c = conn.cursor()
 
-# Users Table Create
-c.execute('''
-CREATE TABLE IF NOT EXISTS system_users (
-    username TEXT PRIMARY KEY,
-    name TEXT,
-    password_hash TEXT,
-    role TEXT
-)
-''')
+# Naye columns add karna
+try:
+    c.execute("ALTER TABLE system_users ADD COLUMN email TEXT")
+except:
+    pass
 
-# Admin account: Username = wasif, Password = Admin@123
-admin_pass = make_hash("Admin@123")
-c.execute('''
-INSERT OR IGNORE INTO system_users (username, name, password_hash, role)
-VALUES (?, ?, ?, ?)
-''', ('wasif', 'Muhammad Wasif Ali', admin_pass, 'Administrator'))
+try:
+    c.execute("ALTER TABLE system_users ADD COLUMN otp TEXT")
+except:
+    pass
+
+# Admin (Wasif) ke account ke sath apni recovery email link karein
+# Neeche apni actual Gmail address likhein
+admin_email = "placement.gctfsd@gmail.com"  # <-- Yahan apna Gmail address likhein
+
+c.execute("UPDATE system_users SET email = ? WHERE username = 'wasif'", (admin_email.strip().lower(),))
 
 conn.commit()
 conn.close()
-print("Success! Users table ban gaya aur Wasif Admin account create ho gaya.")
+print("Success! Database columns update ho gaye aur Admin email save ho gayi.")
