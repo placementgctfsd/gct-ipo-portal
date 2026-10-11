@@ -63,6 +63,22 @@ if st.sidebar.button("Logout"):
 st.sidebar.markdown("---")
 
 # ==========================================
+# GLOBAL DELETE PROTECTION (Admin Only)
+# ==========================================
+_original_st_button = st.button
+
+def protected_button(label, *args, **kwargs):
+    # Agar button ke naam mein delete/remove ho aur user Admin na ho
+    if any(w in str(label).lower() for w in ["delete", "remove", "clear table", "drop"]):
+        if st.session_state.get("user_info", {}).get("role") != "Administrator":
+            st.caption(f"🔒 `{label}` (Sirf Admin ke liye)")
+            return False
+    return _original_st_button(label, *args, **kwargs)
+
+st.button = protected_button
+# ==========================================
+
+# ==========================================
 # ADMIN USER MANAGEMENT PANEL
 # ==========================================
 if st.session_state["user_info"]["role"] == "Administrator":
