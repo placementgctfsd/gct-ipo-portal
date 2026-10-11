@@ -1,0 +1,3 @@
+__pycache__/
+*.pyc
+Start_IPO_System.bat
