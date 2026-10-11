@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
+import hashlib
 import io
 import re
 import json
@@ -13,6 +14,102 @@ from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+
+# ==========================================
+# AUTHENTICATION & LOGIN LOGIC
+# ==========================================
+def check_user_login(username, password):
+    p_hash = hashlib.sha256(str.encode(password)).hexdigest()
+    conn = sqlite3.connect("ipo_management.db")
+    c = conn.cursor()
+    c.execute("SELECT username, name, role FROM system_users WHERE username = ? AND password_hash = ?", (username.strip().lower(), p_hash))
+    res = c.fetchone()
+    conn.close()
+    if res:
+        return {"username": res[0], "name": res[1], "role": res[2]}
+    return None
+
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+    st.session_state["user_info"] = None
+
+if not st.session_state["logged_in"]:
+    st.title("🔐 GCT Samanabad - IPO Management System")
+    st.info("System access karne ke liye apna username aur password enter karein.")
+    
+    with st.form("login_box"):
+        u_in = st.text_input("Username")
+        p_in = st.text_input("Password", type="password")
+        btn = st.form_submit_button("Login")
+        
+        if btn:
+            user = check_user_login(u_in, p_in)
+            if user:
+                st.session_state["logged_in"] = True
+                st.session_state["user_info"] = user
+                st.success(f"Khush Amdeed, {user['name']}!")
+                st.rerun()
+            else:
+                st.error("Ghalat Username ya Password! Dobara koshish karein.")
+    st.stop()  # Is line se aage poora system band rahega jab tak login na ho
+
+# Sidebar par user profile aur logout button
+st.sidebar.markdown(f"👤 **{st.session_state['user_info']['name']}**")
+st.sidebar.markdown(f"Role: `{st.session_state['user_info']['role']}`")
+if st.sidebar.button("Logout"):
+    st.session_state["logged_in"] = False
+    st.session_state["user_info"] = None
+    st.rerun()
+st.sidebar.markdown("---")
+
+# ==========================================
+# ADMIN USER MANAGEMENT PANEL
+# ==========================================
+if st.session_state["user_info"]["role"] == "Administrator":
+    with st.sidebar.expander("⚙️ User Management (Admin Only)"):
+        st.markdown("#### Naya User Banayein")
+        new_u = st.text_input("Username", key="new_u_key")
+        new_n = st.text_input("Pura Naam", key="new_n_key")
+        new_p = st.text_input("Password", type="password", key="new_p_key")
+        new_role = st.selectbox("Role", ["Operator", "Staff"], key="new_role_key")
+        
+        if st.button("Create User"):
+            if new_u and new_p:
+                conn_u = sqlite3.connect("ipo_management.db")
+                c_u = conn_u.cursor()
+                p_hash = hashlib.sha256(str.encode(new_p)).hexdigest()
+                try:
+                    c_u.execute("INSERT INTO system_users VALUES (?, ?, ?, ?)", (new_u.strip().lower(), new_n, p_hash, new_role))
+                    conn_u.commit()
+                    st.success(f"User '{new_u}' ban gaya!")
+                except:
+                    st.error("Yeh username pehle se mojood hai.")
+                conn_u.close()
+                st.rerun()
+            else:
+                st.warning("Username aur Password likhna zaroori hai.")
+
+        st.markdown("---")
+        st.markdown("#### Mojooda Users")
+        conn_u = sqlite3.connect("ipo_management.db")
+        c_u = conn_u.cursor()
+        c_u.execute("SELECT username, name, role FROM system_users WHERE role != 'Administrator'")
+        all_users = c_u.fetchall()
+        conn_u.close()
+        
+        for u in all_users:
+            col_a, col_b = st.columns([3, 1])
+            col_a.write(f"**{u[1]}** (`{u[0]}`)\n*{u[2]}*")
+            if col_b.button("❌", key=f"del_user_{u[0]}"):
+                conn_u = sqlite3.connect("ipo_management.db")
+                c_u = conn_u.cursor()
+                c_u.execute("DELETE FROM system_users WHERE username = ?", (u[0],))
+                conn_u.commit()
+                conn_u.close()
+                st.success(f"{u[0]} delete ho gaya.")
+                st.rerun()
+# ==========================================
+# ==========================================
 
 # PDF aur Image Parsing Support
 try:
