@@ -5,3 +5,4 @@ xlsxwriter
 reportlab
 python-docx
 pypdf
+psycopg2-binary

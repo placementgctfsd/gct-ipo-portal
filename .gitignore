@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 Start_IPO_System.bat
+ipo_management.db
+.streamlit/secrets.toml
