@@ -2048,7 +2048,13 @@ def render_comm_charges_html(app_data):
 conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
 cursor = conn.cursor()
 
-cursor.execute("""
+# Database Type Detection (PostgreSQL / Supabase vs SQLite)
+is_postgres = "psycopg2" in str(type(cursor)).lower() or "postgres" in str(type(conn)).lower()
+pk_auto = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+blob_type = "BYTEA" if is_postgres else "BLOB"
+
+# 1. Students Table
+cursor.execute(f"""
 CREATE TABLE IF NOT EXISTS students (
     cnic TEXT PRIMARY KEY,
     roll_no TEXT,
@@ -2062,18 +2068,20 @@ CREATE TABLE IF NOT EXISTS students (
     placed_salary TEXT,
     placed_date TEXT,
     cv_verified INTEGER DEFAULT 0,
-    cv_blob BLOB,
+    cv_blob {blob_type},
     cv_filename TEXT
 )
 """)
+conn.commit()
 
+# Safe Column Additions for students table
 for col_def in [
     ("email", "TEXT"),
     ("placed_company", "TEXT"),
     ("placed_salary", "TEXT"),
     ("placed_date", "TEXT"),
     ("cv_verified", "INTEGER DEFAULT 0"),
-    ("cv_blob", "BLOB"),
+    ("cv_blob", blob_type),
     ("cv_filename", "TEXT")
 ]:
     try:
@@ -2089,22 +2097,24 @@ for col_def in [
             if hasattr(conn, "rollback"):
                 conn.rollback()
 
-cursor.execute("""
+# 2. Traceability Forms Table
+cursor.execute(f"""
 CREATE TABLE IF NOT EXISTS traceability_forms (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id {pk_auto},
     cnic TEXT NOT NULL,
     student_name TEXT,
     original_filename TEXT,
-    uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    extracted_data_blob BLOB,
-    form_blob BLOB NOT NULL
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    extracted_data_blob {blob_type},
+    form_blob {blob_type} NOT NULL
 )
 """)
 conn.commit()
 
-cursor.execute("""
+# 3. Activities Table
+cursor.execute(f"""
 CREATE TABLE IF NOT EXISTS activities (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id {pk_auto},
     activity_type TEXT,
     title TEXT,
     company_or_speaker TEXT,
@@ -2112,10 +2122,12 @@ CREATE TABLE IF NOT EXISTS activities (
     budget_utilized REAL DEFAULT 0.0
 )
 """)
+conn.commit()
 
-cursor.execute("""
+# 4. Guest Lectures Table
+cursor.execute(f"""
 CREATE TABLE IF NOT EXISTS guest_lectures (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id {pk_auto},
     speaker_name TEXT,
     speaker_type TEXT,
     qualification TEXT,
@@ -2138,10 +2150,12 @@ CREATE TABLE IF NOT EXISTS guest_lectures (
     status TEXT DEFAULT 'Planned'
 )
 """)
+conn.commit()
 
-cursor.execute("""
+# 5. Industry Visits Table
+cursor.execute(f"""
 CREATE TABLE IF NOT EXISTS industry_visits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id {pk_auto},
     industry_name TEXT,
     focal_person TEXT,
     focal_contact TEXT,
@@ -2180,6 +2194,7 @@ CREATE TABLE IF NOT EXISTS industry_visits (
     status TEXT DEFAULT 'Planned'
 )
 """)
+conn.commit()
 
 for col_def in [
     ("q_relevant", "TEXT DEFAULT 'YES'"),
@@ -2199,9 +2214,10 @@ for col_def in [
             if hasattr(conn, "rollback"):
                 conn.rollback()
 
-cursor.execute("""
+# 6. Recruitment Drives Table
+cursor.execute(f"""
 CREATE TABLE IF NOT EXISTS recruitment_drives (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id {pk_auto},
     company_name TEXT,
     company_address TEXT,
     job_location TEXT,
@@ -2249,10 +2265,29 @@ CREATE TABLE IF NOT EXISTS recruitment_drives (
     status TEXT DEFAULT 'Planned'
 )
 """)
+conn.commit()
 
-cursor.execute("""
+for col_rd in [
+    ("participated_cnics_json", "TEXT"),
+    ("selected_cnics_json", "TEXT")
+]:
+    try:
+        cursor.execute(f"ALTER TABLE recruitment_drives ADD COLUMN IF NOT EXISTS {col_rd[0]} {col_rd[1]}")
+        conn.commit()
+    except Exception:
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+            cursor.execute(f"ALTER TABLE recruitment_drives ADD COLUMN {col_rd[0]} {col_rd[1]}")
+            conn.commit()
+        except Exception:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+
+# 7. Monthly Activity Plans Table
+cursor.execute(f"""
 CREATE TABLE IF NOT EXISTS monthly_activity_plans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id {pk_auto},
     month_year TEXT,
     lec_electrical INTEGER,
     lec_mechanical INTEGER,
@@ -2268,9 +2303,10 @@ CREATE TABLE IF NOT EXISTS monthly_activity_plans (
     recruitment_drives_expected INTEGER DEFAULT 0,
     budget_breakdown TEXT,
     total_budget REAL,
-    created_date TEXT DEFAULT CURRENT_DATE
+    created_date DATE DEFAULT CURRENT_DATE
 )
 """)
+conn.commit()
 
 for col_plan in [
     ("lec_shortcourses", "INTEGER DEFAULT 0"),
