@@ -18,6 +18,18 @@ from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
+# ----------------- CLOUD DATABASE SETUP -----------------
+import psycopg2
+
+def get_connection():
+    # Streamlit Secrets se URI uthayega ya default cloud link use karega
+    uri = st.secrets.get("SUPABASE_URI", "postgresql://postgres.mcmesfmsshwfxvtkhnoh:IPO%402025%21db@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres")
+    return psycopg2.connect(uri)
+
+# Universal Override: Tamam purane sqlite3 calls ko Supabase cloud par redirect karega
+sqlite3.connect = lambda *args, **kwargs: get_connection()
+# --------------------------------------------------------
+
 # ==========================================
 # EMAIL SENDER SETUP (OTP)
 # ==========================================
