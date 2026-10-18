@@ -2077,10 +2077,17 @@ for col_def in [
     ("cv_filename", "TEXT")
 ]:
     try:
-        cursor.execute(f"ALTER TABLE students ADD COLUMN {col_def[0]} {col_def[1]}")
+        cursor.execute(f"ALTER TABLE students ADD COLUMN IF NOT EXISTS {col_def[0]} {col_def[1]}")
         conn.commit()
-    except sqlite3.OperationalError:
-        pass
+    except Exception:
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+            cursor.execute(f"ALTER TABLE students ADD COLUMN {col_def[0]} {col_def[1]}")
+            conn.commit()
+        except Exception:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS traceability_forms (
@@ -2180,10 +2187,17 @@ for col_def in [
     ("candidate_limits_json", "TEXT")
 ]:
     try:
-        cursor.execute(f"ALTER TABLE industry_visits ADD COLUMN {col_def[0]} {col_def[1]}")
+        cursor.execute(f"ALTER TABLE industry_visits ADD COLUMN IF NOT EXISTS {col_def[0]} {col_def[1]}")
         conn.commit()
-    except sqlite3.OperationalError:
-        pass
+    except Exception:
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+            cursor.execute(f"ALTER TABLE industry_visits ADD COLUMN {col_def[0]} {col_def[1]}")
+            conn.commit()
+        except Exception:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS recruitment_drives (
@@ -2263,10 +2277,17 @@ for col_plan in [
     ("recruitment_drives_expected", "INTEGER DEFAULT 0")
 ]:
     try:
-        cursor.execute(f"ALTER TABLE monthly_activity_plans ADD COLUMN {col_plan[0]} {col_plan[1]}")
+        cursor.execute(f"ALTER TABLE monthly_activity_plans ADD COLUMN IF NOT EXISTS {col_plan[0]} {col_plan[1]}")
         conn.commit()
-    except sqlite3.OperationalError:
-        pass
+    except Exception:
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+            cursor.execute(f"ALTER TABLE monthly_activity_plans ADD COLUMN {col_plan[0]} {col_plan[1]}")
+            conn.commit()
+        except Exception:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
 
 conn.commit()
 
@@ -4042,16 +4063,20 @@ elif choice == "Student Industry Visit":
 elif choice == "Recruitment Drive":
     st.subheader("On-Campus Recruitment Drive Management & Documentation")
     
-    # Ensure new columns exist in table
-    try:
-        cursor.execute("ALTER TABLE recruitment_drives ADD COLUMN participated_cnics_json TEXT")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE recruitment_drives ADD COLUMN selected_cnics_json TEXT")
-    except:
-        pass
-    conn.commit()
+    # Ensure new columns exist in table safely
+    for col_rd in [("participated_cnics_json", "TEXT"), ("selected_cnics_json", "TEXT")]:
+        try:
+            cursor.execute(f"ALTER TABLE recruitment_drives ADD COLUMN IF NOT EXISTS {col_rd[0]} {col_rd[1]}")
+            conn.commit()
+        except Exception:
+            try:
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+                cursor.execute(f"ALTER TABLE recruitment_drives ADD COLUMN {col_rd[0]} {col_rd[1]}")
+                conn.commit()
+            except Exception:
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
 
     rd_tab1, rd_tab2, rd_tab3 = st.tabs([
         "1. Plan Drive, Candidate Selection & Annexure 'J'", 
