@@ -21,12 +21,63 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 # ----------------- CLOUD DATABASE SETUP -----------------
 import psycopg2
 
-def get_connection():
-    # Streamlit Secrets se URI uthayega ya default cloud link use karega
-    uri = st.secrets.get("SUPABASE_URI", "postgresql://postgres.mcmesfmsshwfxvtkhnoh:IPO%402025%21db@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres")
-    return psycopg2.connect(uri)
+class PostgresCursorWrapper:
+    def __init__(self, cursor):
+        self.cursor = cursor
 
-# Universal Override: Tamam purane sqlite3 calls ko Supabase cloud par redirect karega
+    def execute(self, query, params=None):
+        # Tamam SQLite '?' placeholders ko PostgreSQL '%s' mein badalta hai
+        if isinstance(query, str):
+            query = query.replace('?', '%s')
+        if params is not None:
+            return self.cursor.execute(query, params)
+        return self.cursor.execute(query)
+
+    def executemany(self, query, params_list):
+        if isinstance(query, str):
+            query = query.replace('?', '%s')
+        return self.cursor.executemany(query, params_list)
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
+
+class PostgresConnectionWrapper:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def cursor(self, *args, **kwargs):
+        real_cursor = self.conn.cursor(*args, **kwargs)
+        return PostgresCursorWrapper(real_cursor)
+
+    def commit(self):
+        return self.conn.commit()
+
+    def rollback(self):
+        return self.conn.rollback()
+
+    def close(self):
+        return self.conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self.conn.rollback()
+        else:
+            self.conn.commit()
+        self.conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+
+def get_connection():
+    uri = st.secrets.get("SUPABASE_URI", "postgresql://postgres.mcmesfmsshwfxvtkhnoh:IPO%402025%21db@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres")
+    real_conn = psycopg2.connect(uri)
+    real_conn.autocommit = True
+    return PostgresConnectionWrapper(real_conn)
+
+# SQLite ke tamam calls ko automatically wrapper connection par bhejega
 sqlite3.connect = lambda *args, **kwargs: get_connection()
 # --------------------------------------------------------
 
