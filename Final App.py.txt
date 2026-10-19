@@ -1,205 +1,18 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import hashlib
 import io
 import re
 import json
 import os
 import zlib
 import urllib.parse
-import smtplib
-from email.mime.text import MIMEText
-import random
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
-
-# ==========================================
-# EMAIL SENDER SETUP (OTP)
-# ==========================================
-SENDER_EMAIL = "placement.gctfsd@gmail.com"
-APP_PASSWORD = "jryv lxng zhmb fpvv"
-
-def send_otp_email(to_email, otp_code):
-    try:
-        msg = MIMEText(f"Assalam-o-Alaikum,\n\nIPO Portal password reset OTP: {otp_code}\n\nYeh code kisi ko mat dein.")
-        msg["Subject"] = "IPO Portal - Password Reset OTP"
-        msg["From"] = SENDER_EMAIL
-        msg["To"] = to_email
-
-        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-        server.login(SENDER_EMAIL, APP_PASSWORD.replace(" ", ""))
-        server.sendmail(SENDER_EMAIL, to_email, msg.as_string())
-        server.quit()
-        return True
-    except Exception as e:
-        print("Email error:", e)
-        return False
-
-# ==========================================
-# AUTHENTICATION & LOGIN LOGIC
-# ==========================================
-def check_user_login(username, password):
-    p_hash = hashlib.sha256(str.encode(password)).hexdigest()
-    conn = sqlite3.connect("ipo_management.db")
-    c = conn.cursor()
-    c.execute("SELECT username, name, role FROM system_users WHERE username = ? AND password_hash = ?", (username.strip().lower(), p_hash))
-    res = c.fetchone()
-    conn.close()
-    if res:
-        return {"username": res[0], "name": res[1], "role": res[2]}
-    return None
-
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
-    st.session_state["user_info"] = None
-
-if not st.session_state["logged_in"]:
-    st.title("🔐 GCT Samanabad - IPO Management System")
-    st.info("System access karne ke liye apna username aur password enter karein.")
-    
-    # 1. LOGIN FORM
-    with st.form("login_box"):
-        u_in = st.text_input("Username")
-        p_in = st.text_input("Password", type="password")
-        btn = st.form_submit_button("Login")
-        
-        if btn:
-            user = check_user_login(u_in, p_in)
-            if user:
-                st.session_state["logged_in"] = True
-                st.session_state["user_info"] = user
-                st.success(f"Khush Amdeed, {user['name']}!")
-                st.rerun()
-            else:
-                st.error("Ghalat Username ya Password! Dobara koshish karein.")
-
-    # 2. FORGOT PASSWORD (st.stop se pehle)
-    with st.expander("🔑 Forgot Password?"):
-        reset_user = st.text_input("Apna Username likhein", key="reset_u_input")
-        
-        if st.button("Send Recovery OTP"):
-            conn_r = sqlite3.connect("ipo_management.db")
-            c_r = conn_r.cursor()
-            c_r.execute("SELECT email FROM system_users WHERE username = ?", (reset_user.strip().lower(),))
-            res = c_r.fetchone()
-            
-            if res and res[0]:
-                otp = str(random.randint(100000, 999999))
-                c_r.execute("UPDATE system_users SET otp = ? WHERE username = ?", (otp, reset_user.strip().lower()))
-                conn_r.commit()
-                conn_r.close()
-                
-                if send_otp_email(res[0], otp):
-                    st.success(f"OTP code aapki registered email ({res[0]}) par bhej diya gaya hai!")
-                    st.session_state["otp_sent_to"] = reset_user.strip().lower()
-                else:
-                    st.error("Email send karne mein masla aaya. Internet ya Gmail app password check karein.")
-            else:
-                conn_r.close()
-                st.error("Yeh username mojood nahi ya email link nahi hai.")
-
-        if st.session_state.get("otp_sent_to") == reset_user.strip().lower():
-            entered_otp = st.text_input("Email par aaya hua 6-digit OTP", key="entered_otp")
-            new_password_set = st.text_input("Naya Password", type="password", key="new_password_set")
-            
-            if st.button("Reset Password"):
-                conn_r = sqlite3.connect("ipo_management.db")
-                c_r = conn_r.cursor()
-                c_r.execute("SELECT otp FROM system_users WHERE username = ?", (reset_user.strip().lower(),))
-                db_otp = c_r.fetchone()
-                
-                if db_otp and str(db_otp[0]) == entered_otp.strip():
-                    new_hash = hashlib.sha256(str.encode(new_password_set)).hexdigest()
-                    c_r.execute("UPDATE system_users SET password_hash = ?, otp = NULL WHERE username = ?", (new_hash, reset_user.strip().lower()))
-                    conn_r.commit()
-                    conn_r.close()
-                    st.success("Mubarak! Password update ho gaya. Ab login karein.")
-                    st.session_state["otp_sent_to"] = None
-                else:
-                    conn_r.close()
-                    st.error("Ghalat OTP code enter kiya hai!")
-
-    # 3. Yahan stop hoga login check ke baad
-    st.stop()
-
-# Sidebar par user profile aur logout button
-st.sidebar.markdown(f"👤 **{st.session_state['user_info']['name']}**")
-st.sidebar.markdown(f"Role: `{st.session_state['user_info']['role']}`")
-if st.sidebar.button("Logout"):
-    st.session_state["logged_in"] = False
-    st.session_state["user_info"] = None
-    st.rerun()
-st.sidebar.markdown("---")
-
-# ==========================================
-# GLOBAL DELETE PROTECTION (Admin Only)
-# ==========================================
-_original_st_button = st.button
-
-def protected_button(label, *args, **kwargs):
-    # Agar button ke naam mein delete/remove ho aur user Admin na ho
-    if any(w in str(label).lower() for w in ["delete", "remove", "clear table", "drop"]):
-        if st.session_state.get("user_info", {}).get("role") != "Administrator":
-            st.caption(f"🔒 `{label}` (Sirf Admin ke liye)")
-            return False
-    return _original_st_button(label, *args, **kwargs)
-
-st.button = protected_button
-# ==========================================
-
-# ==========================================
-# ADMIN USER MANAGEMENT PANEL
-# ==========================================
-if st.session_state["user_info"]["role"] == "Administrator":
-    with st.sidebar.expander("⚙️ User Management (Admin Only)"):
-        st.markdown("#### Naya User Banayein")
-        new_u = st.text_input("Username", key="new_u_key")
-        new_n = st.text_input("Pura Naam", key="new_n_key")
-        new_p = st.text_input("Password", type="password", key="new_p_key")
-        new_role = st.selectbox("Role", ["Operator", "Staff"], key="new_role_key")
-        
-        if st.button("Create User"):
-            if new_u and new_p:
-                conn_u = sqlite3.connect("ipo_management.db")
-                c_u = conn_u.cursor()
-                p_hash = hashlib.sha256(str.encode(new_p)).hexdigest()
-                try:
-                    c_u.execute("INSERT INTO system_users VALUES (?, ?, ?, ?)", (new_u.strip().lower(), new_n, p_hash, new_role))
-                    conn_u.commit()
-                    st.success(f"User '{new_u}' ban gaya!")
-                except:
-                    st.error("Yeh username pehle se mojood hai.")
-                conn_u.close()
-                st.rerun()
-            else:
-                st.warning("Username aur Password likhna zaroori hai.")
-
-        st.markdown("---")
-        st.markdown("#### Mojooda Users")
-        conn_u = sqlite3.connect("ipo_management.db")
-        c_u = conn_u.cursor()
-        c_u.execute("SELECT username, name, role FROM system_users WHERE role != 'Administrator'")
-        all_users = c_u.fetchall()
-        conn_u.close()
-        
-        for u in all_users:
-            col_a, col_b = st.columns([3, 1])
-            col_a.write(f"**{u[1]}** (`{u[0]}`)\n*{u[2]}*")
-            if col_b.button("❌", key=f"del_user_{u[0]}"):
-                conn_u = sqlite3.connect("ipo_management.db")
-                c_u = conn_u.cursor()
-                c_u.execute("DELETE FROM system_users WHERE username = ?", (u[0],))
-                conn_u.commit()
-                conn_u.close()
-                st.success(f"{u[0]} delete ho gaya.")
-                st.rerun()
-# ==========================================
-# ==========================================
 
 # PDF aur Image Parsing Support
 try:
@@ -1450,10 +1263,9 @@ def generate_candidate_roster_excel(data, student_df):
 
 def generate_annexure_k_excel(data, student_df=None):
     wb = openpyxl.Workbook()
-    ws = wb.active
     ws.title = "Assessment Sheet"
 
-    ws.merge_cells("A1:M1")
+    ws.merge_cells("A1:L1")
     t_cell = ws["A1"]
     t_cell.value = "Assesment Sheet for Campus Recruitment Drive in Punjab TEVTA's Institutes"
     t_cell.font = Font(name="Calibri", size=13, bold=True, color="FFFFFF")
@@ -1473,14 +1285,14 @@ def generate_annexure_k_excel(data, student_df=None):
     ws["L3"] = str(data.get('salary_range', ''))
 
     ws.merge_cells("A4:E4")
-    ws["A4"] = "Interview evaluation Sheet are to be completed by the District Placement Officer to rank the candidate's. Under each heading, DPO should give the candidate a numerical rating."
+    ws["A4"] = "Interview evaluation Sheet are to be completed by the District Placement Officer / Committee to rank the candidate. Under each heading, numerical rating (1-5) should be given."
     ws["A4"].font = Font(size=8, italic=True)
-    ws.merge_cells("F4:M4")
+    ws.merge_cells("F4:L4")
     ws["F4"] = "Scale:    1- Un Satisfactory,   2- Satisfactory,   3- Average,   4- Good,   5- Excellent"
     ws["F4"].font = Font(size=8, bold=True)
 
     for r in range(2, 5):
-        for c in range(1, 14):
+        for c in range(1, 13):
             cell = ws.cell(row=r, column=c)
             if r in [2, 3] and cell.value and any(k in str(cell.value) for k in ["Venue", "Date", "Trades", "Salary", "Time", "Interviewer"]):
                 cell.font = Font(bold=True)
@@ -1488,7 +1300,7 @@ def generate_annexure_k_excel(data, student_df=None):
     headers = [
         "Sr. No", "Candidate Name", "Trade", "Session", "Institute",
         "Quality of CV", "Verbal Communication", "Candidate Interest",
-        "Interpersonal Skills", "Prior work Experience", "Technical Knowledge", "Overall Impression", "Remarks"
+        "Interpersonal Skills", "Prior Experience", "Technical Knowledge", "Overall Impression"
     ]
     for col_idx, h in enumerate(headers, start=1):
         c = ws.cell(row=5, column=col_idx)
@@ -1513,10 +1325,10 @@ def generate_annexure_k_excel(data, student_df=None):
             ws.cell(row=current_row, column=4, value=str(data.get('session', '')))
             ws.cell(row=current_row, column=5, value="GCT Samanabad")
             
-            for c_idx in range(6, 14):
+            for c_idx in range(6, 13):
                 ws.cell(row=current_row, column=c_idx, value="")
 
-            for c_idx in range(1, 14):
+            for c_idx in range(1, 13):
                 ws.cell(row=current_row, column=c_idx).border = thin_border
                 ws.cell(row=current_row, column=c_idx).font = Font(name="Calibri", size=9)
             current_row += 1
@@ -1525,16 +1337,11 @@ def generate_annexure_k_excel(data, student_df=None):
             r_num = current_row + r_offset
             ws.cell(row=r_num, column=1, value=r_offset + 1).alignment = Alignment(horizontal="center")
             ws.cell(row=r_num, column=5, value="GCT Samanabad")
-            for c_idx in range(1, 14):
+            for c_idx in range(1, 13):
                 ws.cell(row=r_num, column=c_idx).border = thin_border
                 ws.cell(row=r_num, column=c_idx).font = Font(name="Calibri", size=9)
-        current_row += 15
 
-    sig_row = current_row + 2
-    ws.cell(row=sig_row, column=2, value=f"Name of DPO: {data.get('dpo_name', 'Mr. Muhammad Asghar Ch (DPO)')}").font = Font(bold=True)
-    ws.cell(row=sig_row, column=10, value="Signature of DPO with date: ______________________").font = Font(bold=True)
-
-    col_widths = {1: 7, 2: 22, 3: 16, 4: 12, 5: 16, 6: 12, 7: 15, 8: 14, 9: 14, 10: 16, 11: 15, 12: 15, 13: 18}
+    col_widths = {1: 7, 2: 24, 3: 20, 4: 12, 5: 16, 6: 12, 7: 16, 8: 15, 9: 15, 10: 14, 11: 15, 12: 15}
     for c_idx, width in col_widths.items():
         ws.column_dimensions[openpyxl.utils.get_column_letter(c_idx)].width = width
 
@@ -4220,7 +4027,6 @@ elif choice == "Recruitment Drive":
             }
 
             st.markdown("---")
-            st.markdown("##### 📥 Download All Approved Drive Documents (Annexures J, K, L & Roster)")
             b1, b2, b3 = st.columns(3)
             with b1:
                 app_drive_docx = generate_drive_principal_application(d_data)
@@ -4233,15 +4039,6 @@ elif choice == "Recruitment Drive":
             with b3:
                 roster_excel = generate_candidate_roster_excel(d_data, drive_students_df)
                 st.download_button(f"📊 Candidates Roster ({len(drive_students_df)} Students) (.xlsx)", roster_excel, f"Candidates_List_{comp_name.replace(' ', '_')}.xlsx")
-
-            b4, b5 = st.columns(2)
-            with b4:
-                annex_k_tab1 = generate_annexure_k_excel(d_data, drive_students_df)
-                st.download_button(f"📊 Annexure “K” Assessment Sheet ({len(drive_students_df)} Candidates) (.xlsx)", annex_k_tab1, f"Annexure_K_{comp_name.replace(' ', '_')}.xlsx")
-
-            with b5:
-                annex_l_tab1 = generate_annexure_l(d_data)
-                st.download_button("📄 Annexure “L” Employer Feedback (.docx)", annex_l_tab1, f"Annexure_L_{comp_name.replace(' ', '_')}.docx")
 
     with rd_tab2:
         df_drives = pd.read_sql("SELECT id, company_name, drive_date, session, target_techs, venue, drive_time, status FROM recruitment_drives ORDER BY id DESC", conn)
