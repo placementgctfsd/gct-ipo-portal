@@ -17,6 +17,44 @@ from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+# ==========================================
+# UNIVERSAL DATABASE CONNECTION (SUPABASE / SQLITE)
+# ==========================================
+def get_db_connection():
+    # 1. Agar Streamlit Cloud Secrets mein Supabase URL ho toh Supabase use karega
+    if "postgres" in st.secrets:
+        try:
+            pg_url = st.secrets["postgres"]["url"]
+            conn = psycopg2.connect(pg_url)
+            return conn, "postgres"
+        except Exception as e:
+            st.error(f"Supabase connection error: {e}")
+            
+    # 2. Local Fallback (Laptop ke liye)
+    conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
+    return conn, "sqlite"
+
+def run_db_query(query, params=(), fetchone=False, fetchall=False, commit=False):
+    conn, db_type = get_db_connection()
+    c = conn.cursor()
+    if db_type == "postgres":
+        query = query.replace("?", "%s")
+        
+    c.execute(query, params)
+    res = None
+    if fetchone:
+        res = c.fetchone()
+    elif fetchall:
+        res = c.fetchall()
+        
+    if commit:
+        conn.commit()
+        
+    conn.close()
+    return res
 
 # ==========================================
 # EMAIL SENDER SETUP (OTP)
@@ -45,11 +83,8 @@ def send_otp_email(to_email, otp_code):
 # ==========================================
 def check_user_login(username, password):
     p_hash = hashlib.sha256(str.encode(password)).hexdigest()
-    conn = sqlite3.connect("ipo_management.db")
-    c = conn.cursor()
-    c.execute("SELECT username, name, role FROM system_users WHERE username = ? AND password_hash = ?", (username.strip().lower(), p_hash))
-    res = c.fetchone()
-    conn.close()
+    query = "SELECT username, name, role FROM system_users WHERE username = ? AND password_hash = ?"
+    res = run_db_query(query, (username.strip().lower(), p_hash), fetchone=True)
     if res:
         return {"username": res[0], "name": res[1], "role": res[2]}
     return None
@@ -78,21 +113,18 @@ if not st.session_state["logged_in"]:
             else:
                 st.error("Ghalat Username ya Password! Dobara koshish karein.")
 
-    # 2. FORGOT PASSWORD (st.stop se pehle)
+    # 2. FORGOT PASSWORD
     with st.expander("🔑 Forgot Password?"):
         reset_user = st.text_input("Apna Username likhein", key="reset_u_input")
         
         if st.button("Send Recovery OTP"):
-            conn_r = sqlite3.connect("ipo_management.db")
-            c_r = conn_r.cursor()
-            c_r.execute("SELECT email FROM system_users WHERE username = ?", (reset_user.strip().lower(),))
-            res = c_r.fetchone()
+            query = "SELECT email FROM system_users WHERE username = ?"
+            res = run_db_query(query, (reset_user.strip().lower(),), fetchone=True)
             
             if res and res[0]:
                 otp = str(random.randint(100000, 999999))
-                c_r.execute("UPDATE system_users SET otp = ? WHERE username = ?", (otp, reset_user.strip().lower()))
-                conn_r.commit()
-                conn_r.close()
+                upd_query = "UPDATE system_users SET otp = ? WHERE username = ?"
+                run_db_query(upd_query, (otp, reset_user.strip().lower()), commit=True)
                 
                 if send_otp_email(res[0], otp):
                     st.success(f"OTP code aapki registered email ({res[0]}) par bhej diya gaya hai!")
@@ -100,7 +132,6 @@ if not st.session_state["logged_in"]:
                 else:
                     st.error("Email send karne mein masla aaya. Internet ya Gmail app password check karein.")
             else:
-                conn_r.close()
                 st.error("Yeh username mojood nahi ya email link nahi hai.")
 
         if st.session_state.get("otp_sent_to") == reset_user.strip().lower():
@@ -108,23 +139,19 @@ if not st.session_state["logged_in"]:
             new_password_set = st.text_input("Naya Password", type="password", key="new_password_set")
             
             if st.button("Reset Password"):
-                conn_r = sqlite3.connect("ipo_management.db")
-                c_r = conn_r.cursor()
-                c_r.execute("SELECT otp FROM system_users WHERE username = ?", (reset_user.strip().lower(),))
-                db_otp = c_r.fetchone()
+                q_verify = "SELECT otp FROM system_users WHERE username = ?"
+                db_otp = run_db_query(q_verify, (reset_user.strip().lower(),), fetchone=True)
                 
-                if db_otp and str(db_otp[0]) == entered_otp.strip():
+                if db_otp and str(db_otp[0]) == str(entered_otp.strip()):
                     new_hash = hashlib.sha256(str.encode(new_password_set)).hexdigest()
-                    c_r.execute("UPDATE system_users SET password_hash = ?, otp = NULL WHERE username = ?", (new_hash, reset_user.strip().lower()))
-                    conn_r.commit()
-                    conn_r.close()
-                    st.success("Mubarak! Password update ho gaya. Ab login karein.")
-                    st.session_state["otp_sent_to"] = None
+                    q_update_pass = "UPDATE system_users SET password_hash = ?, otp = NULL WHERE username = ?"
+                    run_db_query(q_update_pass, (new_hash, reset_user.strip().lower()), commit=True)
+                    st.success("Password successfully update ho gaya! Ab naye password se login karein.")
+                    del st.session_state["otp_sent_to"]
+                    st.rerun()
                 else:
-                    conn_r.close()
-                    st.error("Ghalat OTP code enter kiya hai!")
+                    st.error("Ghalat OTP! Dobara check karein.")
 
-    # 3. Yahan stop hoga login check ke baad
     st.stop()
 
 # Sidebar par user profile aur logout button
