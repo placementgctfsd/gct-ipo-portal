@@ -2072,19 +2072,8 @@ def render_comm_charges_html(app_data):
 
 # ----------------- Database Setup & Migrations -----------------
 
-# --- FORCE SUPABASE CONNECTION ---
-import psycopg2
-
-SUPABASE_URL = "postgresql://postgres.mcmesfmsshwfxvtkhnoh:IPO%402025!db@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
-
-try:
-    if "postgres" in st.secrets:
-        conn = psycopg2.connect(st.secrets["postgres"]["url"])
-    else:
-        conn = psycopg2.connect(SUPABASE_URL)
-    cursor = conn.cursor()
-except Exception as e:
-    st.error(f"Supabase connection failed: {e}")
+conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
+cursor = conn.cursor()
 
 # Database Type Detection (PostgreSQL / Supabase vs SQLite)
 is_postgres = "psycopg2" in str(type(cursor)).lower() or "postgres" in str(type(conn)).lower()
@@ -3107,9 +3096,7 @@ elif choice == "Student Directory":
                 params.extend([f"%{search_query.strip()}%", f"%{search_query.strip()}%", f"%{search_query.strip()}%"])
 
         query += " ORDER BY session DESC, technology ASC, rowid DESC LIMIT 1000"
-        # Convert SQLite placeholders (?) to PostgreSQL placeholders (%s) for Supabase
-pg_query = query.replace("?", "%s")
-df_display = pd.read_sql(pg_query, conn, params=params if params else None)
+        df_display = pd.read_sql(query, conn, params=params)
 
         if search_industry.strip() and not df_display.empty:
             st.markdown(f"#### 📊 Placed Candidates Summary in '{search_industry.strip()}'")
