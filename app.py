@@ -4127,7 +4127,7 @@ elif choice == "Student Industry Visit":
 elif choice == "Recruitment Drive":
     st.subheader("On-Campus Recruitment Drive Management & Documentation")
     
-    # Database Table columns check / creation
+    # Safe Database Column Alterations
     for col_rd in [("participated_cnics_json", "TEXT"), ("selected_cnics_json", "TEXT")]:
         try:
             cursor.execute(f"ALTER TABLE recruitment_drives ADD COLUMN IF NOT EXISTS {col_rd[0]} {col_rd[1]}")
@@ -4372,7 +4372,7 @@ elif choice == "Recruitment Drive":
 
             st.markdown("---")
             st.markdown("#### 📝 Annexure “K” Assessment Sheet Setup")
-            st.caption("Participated candidates ka source chunein (Sirf Database se ya Database + Temporary Excel merge):")
+            st.caption("Participated candidates ka source aur input method select karein:")
 
             saved_part_cnics = []
             if dr_data.get('participated_cnics_json'):
@@ -4381,150 +4381,198 @@ elif choice == "Recruitment Drive":
                 except Exception:
                     saved_part_cnics = []
 
-            # --- 2 DYNAMIC OPTIONS FOR ANNEXURE K ---
-            k_gen_mode = st.radio(
+            # --- MAIN 2 CONDITIONS ---
+            k_mode_choice = st.radio(
                 "Assessment Sheet Candidate Data Source:",
                 [
-                    "🔍 Option 1: Search Participated Students (Strictly From Database)",
-                    "📂 Option 2: Search From Database + Fallback to Temporary Excel (Combined/Merge Mode)"
+                    "🔍 Option 1: Strictly Search From Database",
+                    "📂 Option 2: Search Database + Fallback to Temporary Data File (Combined/Merge)"
                 ],
                 horizontal=False,
-                key=f"k_gen_mode_sel_{selected_drive_id}"
+                key=f"k_main_mode_choice_{selected_drive_id}"
             )
 
+            target_raw_cnics = []
             cand_df = pd.DataFrame(columns=['Roll No', 'Name', 'Technology', 'Session', 'CNIC'])
-            unmatched_k = []
-            k_raw_cnics = []
 
             # =========================================================================
-            # OPTION 1: STRICTLY FROM DATABASE (PASTE / LIST)
+            # OPTION 1: STRICTLY DATABASE SEARCH (PASTE YA EXCEL UPLOAD)
             # =========================================================================
-            if k_gen_mode == "🔍 Option 1: Search Participated Students (Strictly From Database)":
-                st.info("💡 Yeh mode sirf un candidates ko layega jo aapke Placement Portal Database mein pehle se registered hain.")
-                default_k_text = "\n".join(saved_part_cnics) if saved_part_cnics else ""
-                k_text = st.text_area(
-                    "Participated Students ke CNICs paste karein (Har line par aik CNIC):", 
-                    value=default_k_text, 
-                    placeholder="33100-1234567-1\n33100-7654321-2", 
-                    key=f"k_text_opt1_{selected_drive_id}",
-                    height=130
-                )
-                if k_text.strip():
-                    k_raw_cnics = re.split(r"[\n,\s;]+", k_text.strip())
-                elif saved_part_cnics:
-                    k_raw_cnics = saved_part_cnics
+            if k_mode_choice == "🔍 Option 1: Strictly Search From Database":
+                st.info("💡 Yeh mode sirf unhi students ko layega jo pehle se Database mein mojood hain.")
+                
+                in_tab1, in_tab2 = st.tabs(["✍️ Direct Paste CNICs", "📁 Upload Target CNICs File (.xlsx / .csv)"])
+                
+                with in_tab1:
+                    default_paste = "\n".join(saved_part_cnics) if saved_part_cnics else ""
+                    pasted_val = st.text_area(
+                        "CNICs Paste karein (Har line par aik CNIC):",
+                        value=default_paste,
+                        placeholder="33100-1234567-1\n33100-7654321-2",
+                        key=f"opt1_paste_area_{selected_drive_id}",
+                        height=120
+                    )
+                    if pasted_val.strip():
+                        target_raw_cnics = re.split(r"[\n,\s;]+", pasted_val.strip())
+                    elif saved_part_cnics:
+                        target_raw_cnics = saved_part_cnics
 
-                if k_raw_cnics:
-                    target_k_dashed, lookup_k = parse_cnic_input(k_raw_cnics)
-                    if lookup_k:
-                        placeholders_k = ",".join([pl] * len(lookup_k))
-                        sql_k_query = f"""
+                with in_tab2:
+                    up_file1 = st.file_uploader(
+                        "CNICs wali File Upload Karein (.xlsx / .csv):",
+                        type=["xlsx", "csv"],
+                        key=f"opt1_file_up_{selected_drive_id}"
+                    )
+                    if up_file1 is not None:
+                        try:
+                            df_in1 = pd.read_csv(up_file1, dtype=str) if up_file1.name.lower().endswith(".csv") else pd.read_excel(up_file1, dtype=str)
+                            col_c1 = next((c for c in df_in1.columns if "cnic" in str(c).lower()), None)
+                            if not col_c1:
+                                col_c1 = st.selectbox("Sheet mein se CNIC column select karein:", df_in1.columns, key=f"opt1_col_sel_{selected_drive_id}")
+                            if col_c1:
+                                target_raw_cnics = df_in1[col_c1].dropna().tolist()
+                        except Exception as e:
+                            st.error(f"File parhne mein masla aya: {e}")
+
+                if target_raw_cnics:
+                    target_dashed, lookup_cnics = parse_cnic_input(target_raw_cnics)
+                    if lookup_cnics:
+                        placeholders_k = ",".join([pl] * len(lookup_cnics))
+                        sql_k = f"""
                             SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', cnic AS 'CNIC'
                             FROM students 
                             WHERE cnic IN ({placeholders_k})
                             ORDER BY technology, roll_no
                         """
-                        cand_df = pd.read_sql(sql_k_query, conn, params=lookup_k)
+                        cand_df = pd.read_sql(sql_k, conn, params=lookup_cnics)
                         found_k = set(cand_df['CNIC'].tolist())
-                        unmatched_k = [c for c in target_k_dashed if c not in found_k]
+                        unmatched_k = [c for c in target_dashed if c not in found_k]
 
-                        st.success(f"✅ Database se **{len(cand_df)}** Valid Registered Candidates mil gaye.")
-
+                        st.success(f"✅ Database se **{len(cand_df)}** Valid Candidates mil gaye.")
                         if unmatched_k:
-                            st.warning(f"⚠️ **{len(unmatched_k)}** CNICs Database mein nahi milay. (Agar unka data Excel mein mojood hai toh Option 2 use karein).")
-                            with st.expander("Dekhein missing CNICs"):
+                            st.warning(f"⚠️ **{len(unmatched_k)}** CNICs Database mein nahi milay.")
+                            with st.expander("Dekhein kon se CNICs missing hain"):
                                 st.write(unmatched_k)
 
             # =========================================================================
-            # OPTION 2: DATABASE + TEMPORARY EXCEL (COMBINED / MERGE)
+            # OPTION 2: COMBINED SEARCH (DATABASE + TEMPORARY REFERENCE FILE)
             # =========================================================================
             else:
-                st.info("💡 **Combined Mode:** System pehle database se dhoondega. Jo student database mein nahi milega, uska Name, Roll No aur Trade uploaded Excel file se utha kar Annexure 'K' mein shamil kar dega!")
+                st.info("💡 **Combined Mode:** Target CNICs upload ya paste karein, aur sath Temporary Reference File upload karein jahan se missing students ki details uthayi jayengi.")
                 
-                k_file = st.file_uploader(
-                    "Temporary Candidates File Upload Karein (.xlsx / .csv):", 
-                    type=["xlsx", "csv"], 
-                    key=f"k_combined_file_{selected_drive_id}"
+                # Part A: Target CNICs input (Paste ya File)
+                st.markdown("###### 1️⃣ Target CNICs Input (Kisko Search Karna Hai):")
+                comb_tab1, comb_tab2 = st.tabs(["✍️ Direct Paste CNICs", "📁 Upload Target CNICs File"])
+                
+                with comb_tab1:
+                    default_comb_paste = "\n".join(saved_part_cnics) if saved_part_cnics else ""
+                    comb_pasted_val = st.text_area(
+                        "Target CNICs Paste karein:",
+                        value=default_comb_paste,
+                        placeholder="33100-1234567-1\n33100-7654321-2",
+                        key=f"opt2_paste_area_{selected_drive_id}",
+                        height=100
+                    )
+                    if comb_pasted_val.strip():
+                        target_raw_cnics = re.split(r"[\n,\s;]+", comb_pasted_val.strip())
+                    elif saved_part_cnics:
+                        target_raw_cnics = saved_part_cnics
+
+                with comb_tab2:
+                    up_file2 = st.file_uploader(
+                        "Target CNICs Sheet Upload Karein (.xlsx / .csv):",
+                        type=["xlsx", "csv"],
+                        key=f"opt2_file_up_{selected_drive_id}"
+                    )
+                    if up_file2 is not None:
+                        try:
+                            df_in2 = pd.read_csv(up_file2, dtype=str) if up_file2.name.lower().endswith(".csv") else pd.read_excel(up_file2, dtype=str)
+                            col_c2 = next((c for c in df_in2.columns if "cnic" in str(c).lower()), None)
+                            if not col_c2:
+                                col_c2 = st.selectbox("Sheet se CNIC column select karein:", df_in2.columns, key=f"opt2_col_sel_{selected_drive_id}")
+                            if col_c2:
+                                target_raw_cnics = df_in2[col_c2].dropna().tolist()
+                        except Exception as e:
+                            st.error(f"Target file error: {e}")
+
+                # Part B: Temporary Reference File (Jis mein se details leni hain)
+                st.markdown("###### 2️⃣ Temporary Reference Data File (Jahan se missing students ka Name, Trade wagera uthana hai):")
+                ref_file = st.file_uploader(
+                    "Temporary Data File Upload Karein (.xlsx / .csv):",
+                    type=["xlsx", "csv"],
+                    key=f"opt2_reference_file_{selected_drive_id}"
                 )
 
-                if k_file is not None:
-                    try:
-                        if k_file.name.lower().endswith(".csv"):
-                            temp_excel_df = pd.read_csv(k_file, dtype=str)
-                        else:
-                            temp_excel_df = pd.read_excel(k_file, dtype=str)
+                if target_raw_cnics:
+                    target_dashed, lookup_cnics = parse_cnic_input(target_raw_cnics)
+                    
+                    # 1. Pehle Database Query
+                    db_matched_df = pd.DataFrame()
+                    if lookup_cnics:
+                        placeholders_k = ",".join([pl] * len(lookup_cnics))
+                        sql_k = f"""
+                            SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', cnic AS 'CNIC'
+                            FROM students 
+                            WHERE cnic IN ({placeholders_k})
+                        """
+                        db_matched_df = pd.read_sql(sql_k, conn, params=lookup_cnics)
 
-                        cnic_col = None
-                        for c in temp_excel_df.columns:
-                            if "cnic" in str(c).lower():
-                                cnic_col = c
-                                break
-                        
-                        if not cnic_col:
-                            cnic_col = st.selectbox("Excel Sheet mein se CNIC column select karein:", temp_excel_df.columns, key=f"cnic_col_sel_{selected_drive_id}")
+                    found_in_db = set(db_matched_df['CNIC'].tolist()) if not db_matched_df.empty else set()
+                    missing_from_db = [c for c in target_dashed if c not in found_in_db]
 
-                        if cnic_col:
-                            raw_file_cnics = temp_excel_df[cnic_col].dropna().tolist()
-                            target_k_dashed, lookup_k = parse_cnic_input(raw_file_cnics)
-
-                            # 1. Pehle Database se query karein
-                            db_matched_df = pd.DataFrame()
-                            if lookup_k:
-                                placeholders_k = ",".join([pl] * len(lookup_k))
-                                sql_k_query = f"""
-                                    SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', cnic AS 'CNIC'
-                                    FROM students 
-                                    WHERE cnic IN ({placeholders_k})
-                                """
-                                db_matched_df = pd.read_sql(sql_k_query, conn, params=lookup_k)
-
-                            found_in_db = set(db_matched_df['CNIC'].tolist()) if not db_matched_df.empty else set()
+                    # 2. Jo Database mein nahi hain, unhein Temporary Reference File se dhoondein
+                    excel_found_rows = []
+                    if ref_file is not None and missing_from_db:
+                        try:
+                            ref_df = pd.read_csv(ref_file, dtype=str) if ref_file.name.lower().endswith(".csv") else pd.read_excel(ref_file, dtype=str)
                             
-                            # 2. Jo database mein nahi hain, unhein temporary Excel se uthayein
-                            excel_extracted_rows = []
-                            name_col = next((c for c in temp_excel_df.columns if any(k in str(c).lower() for k in ["name", "student"])), None)
-                            roll_col = next((c for c in temp_excel_df.columns if "roll" in str(c).lower()), None)
-                            tech_col = next((c for c in temp_excel_df.columns if any(k in str(c).lower() for k in ["tech", "trade"])), None)
+                            ref_cnic_col = next((c for c in ref_df.columns if "cnic" in str(c).lower()), None)
+                            ref_name_col = next((c for c in ref_df.columns if any(k in str(c).lower() for k in ["name", "student"])), None)
+                            ref_roll_col = next((c for c in ref_df.columns if "roll" in str(c).lower()), None)
+                            ref_tech_col = next((c for c in ref_df.columns if any(k in str(c).lower() for k in ["tech", "trade"])), None)
 
-                            for _, r in temp_excel_df.iterrows():
-                                raw_c = str(r[cnic_col]).strip()
-                                d_c = extract_digits(raw_c)
-                                norm_c = f"{d_c[:5]}-{d_c[5:12]}-{d_c[12]}" if len(d_c) == 13 else raw_c
+                            if ref_cnic_col:
+                                for _, r in ref_df.iterrows():
+                                    raw_rc = str(r[ref_cnic_col]).strip()
+                                    d_rc = extract_digits(raw_rc)
+                                    norm_rc = f"{d_rc[:5]}-{d_rc[5:12]}-{d_rc[12]}" if len(d_rc) == 13 else raw_rc
 
-                                if norm_c not in found_in_db and d_c not in found_in_db:
-                                    s_name = str(r[name_col]).strip() if name_col and pd.notna(r[name_col]) else "Trainee"
-                                    s_roll = str(r[roll_col]).strip() if roll_col and pd.notna(r[roll_col]) else "-"
-                                    s_tech = str(r[tech_col]).strip() if tech_col and pd.notna(r[tech_col]) else (dr_data['target_techs'][0] if dr_data['target_techs'] else "General")
-                                    
-                                    excel_extracted_rows.append({
-                                        'Roll No': s_roll,
-                                        'Name': s_name,
-                                        'Technology': s_tech,
-                                        'Session': dr_data['session'],
-                                        'CNIC': norm_c
-                                    })
+                                    if norm_rc in missing_from_db or d_rc in missing_from_db:
+                                        s_name = str(r[ref_name_col]).strip() if ref_name_col and pd.notna(r[ref_name_col]) else "Trainee"
+                                        s_roll = str(r[ref_roll_col]).strip() if ref_roll_col and pd.notna(r[ref_roll_col]) else "-"
+                                        s_tech = str(r[ref_tech_col]).strip() if ref_tech_col and pd.notna(r[ref_tech_col]) else (dr_data['target_techs'][0] if dr_data['target_techs'] else "General")
 
-                            excel_only_df = pd.DataFrame(excel_extracted_rows)
+                                        excel_found_rows.append({
+                                            'Roll No': s_roll,
+                                            'Name': s_name,
+                                            'Technology': s_tech,
+                                            'Session': dr_data['session'],
+                                            'CNIC': norm_rc
+                                        })
+                        except Exception as e:
+                            st.error(f"Reference file read karne mein masla: {e}")
 
-                            # 3. Dono ko merge karein
-                            cand_df = pd.concat([db_matched_df, excel_only_df], ignore_index=True)
-                            
-                            st.success(
-                                f"🎉 Combined List Ready! Kul: **{len(cand_df)} Students** "
-                                f"(🏛️ Database se: **{len(db_matched_df)}** | 📂 Temporary Excel se: **{len(excel_only_df)}**)"
-                            )
+                    excel_found_df = pd.DataFrame(excel_found_rows)
+                    if not excel_found_df.empty:
+                        excel_found_df = excel_found_df.drop_duplicates(subset=['CNIC'])
 
-                            if not excel_only_df.empty:
-                                with st.expander("Dekhein jo students Temporary Excel se uthaye gaye"):
-                                    st.dataframe(excel_only_df[['Roll No', 'Name', 'Technology', 'CNIC']], use_container_width=True)
+                    # 3. Merge both dataframes
+                    cand_df = pd.concat([db_matched_df, excel_found_df], ignore_index=True)
 
-                    except Exception as e:
-                        st.error(f"Excel read karne mein masla aya: {e}")
-                else:
-                    st.info("Kripya candidate list wali temporary Excel ya CSV file upload karein.")
+                    st.success(
+                        f"🎉 Combined Results: Kul **{len(cand_df)} Students** shamil huay "
+                        f"(🏛️ Database: **{len(db_matched_df)}** | 📂 Temporary File: **{len(excel_found_df)}**)"
+                    )
+
+                    all_found_set = set(cand_df['CNIC'].tolist())
+                    still_missing = [c for c in target_dashed if c not in all_found_set]
+                    if still_missing:
+                        st.warning(f"⚠️ **{len(still_missing)}** CNICs na to Database mein milay aur na hi Temporary File mein!")
+                        with st.expander("Dekhein dono jagah se missing CNICs"):
+                            st.write(still_missing)
 
             # =========================================================================
-            # SAVE & DOWNLOAD ANNEXURE K
+            # SAVE, EDIT & DOWNLOAD (COMMON ACTIONS)
             # =========================================================================
             if not cand_df.empty:
                 col_save_k, col_clr_k = st.columns([1, 1])
@@ -4550,8 +4598,8 @@ elif choice == "Recruitment Drive":
                             st.warning("Participated list reset ho gayi hai.")
                             st.rerun()
 
-                # EDIT / REMOVE / ADD SINGLE CANDIDATE SECTION
-                with st.expander("🛠️ Edit / Galti Durust Karein (Participated Candidates Management)"):
+                # Single Candidate Management (Remove / Add)
+                with st.expander("🛠️ Candidates Management (Galti Durust / Add Karein)"):
                     cand_remove_options = {
                         f"{r['Roll No']} - {r['Name']} ({r['Technology']}) [{r['CNIC']}]": r['CNIC']
                         for _, r in cand_df.iterrows()
@@ -4570,9 +4618,8 @@ elif choice == "Recruitment Drive":
                         st.rerun()
 
                     st.markdown("---")
-                    st.markdown("**➕ Missing Candidate Shamil Karein:**")
                     new_add_cnic = st.text_input("New Student CNIC to Add:", placeholder="33100-1234567-1", key="add_new_part_cnic_input")
-                    if st.button("➕ Add This CNIC to Participated List", key="btn_add_part_single_cnic"):
+                    if st.button("➕ Add This CNIC to List", key="btn_add_part_single_cnic"):
                         if new_add_cnic.strip():
                             _, lookup_new = parse_cnic_input([new_add_cnic.strip()])
                             if lookup_new:
@@ -4591,7 +4638,7 @@ elif choice == "Recruitment Drive":
                                 else:
                                     st.error("Diya gaya CNIC student directory mein nahi mila.")
 
-                # Generate Annexure K
+                # Download Annexure K Excel
                 annex_k_excel = generate_annexure_k_excel(dr_data, cand_df)
                 st.download_button(
                     label=f"📊 Download Official Annexure “K” Assessment Sheet ({len(cand_df)} Candidates) (.xlsx)",
