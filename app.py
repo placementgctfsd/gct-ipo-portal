@@ -4121,12 +4121,13 @@ elif choice == "Student Industry Visit":
             st.write("Abhi tak koi industrial visit record nahi mila.")
 
             # =========================================================================
+# =========================================================================
 # --- 6. Recruitment Drive ---
 # =========================================================================
 elif choice == "Recruitment Drive":
     st.subheader("On-Campus Recruitment Drive Management & Documentation")
     
-    # Ensure new columns exist in table safely
+    # Safe Column Additions for PostgreSQL & SQLite
     for col_rd in [("participated_cnics_json", "TEXT"), ("selected_cnics_json", "TEXT")]:
         try:
             cursor.execute(f"ALTER TABLE recruitment_drives ADD COLUMN IF NOT EXISTS {col_rd[0]} {col_rd[1]}")
@@ -4147,6 +4148,9 @@ elif choice == "Recruitment Drive":
         "3. Permanent Archive, Edit & Delete"
     ])
 
+    # -------------------------------------------------------------------------
+    # TAB 1: PLAN DRIVE, CANDIDATE SELECTION & ANNEXURE J
+    # -------------------------------------------------------------------------
     with rd_tab1:
         st.markdown("##### Pre-Drive: Company Profile, Job Details & Administrative Approvals")
         
@@ -4173,6 +4177,7 @@ elif choice == "Recruitment Drive":
 
         custom_counts = {}
         all_eligible_list = []
+        pl = "%s" if is_postgres else "?"
 
         if selection_mode == "Custom Tadaad (Specify Count Per Technology)" and target_techs:
             st.caption("Neeche har select shuda technology ka live count check karein aur jitne students chahiyein utne enter karein:")
@@ -4181,8 +4186,8 @@ elif choice == "Recruitment Drive":
             
             for idx, t in enumerate(target_techs):
                 with t_cols[idx % num_cols]:
-                    cursor.execute("SELECT COUNT(*) FROM students WHERE session = ? AND technology = ?", (target_session, t))
-                    avail = cursor.fetchone()[0]
+                    cursor.execute(f"SELECT COUNT(*) FROM students WHERE session = {pl} AND technology = {pl}", (target_session, t))
+                    avail = cursor.fetchone()[0] or 0
                     st.markdown(f"**🔧 {t}**")
                     cnt = st.number_input(
                         f"DB Available: {avail}",
@@ -4194,16 +4199,16 @@ elif choice == "Recruitment Drive":
                     )
                     custom_counts[t] = cnt
                     if cnt > 0:
-                        q_t = f"SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', cnic AS 'CNIC', phone AS 'Mobile Number', email AS 'Email' FROM students WHERE session = ? AND technology = ? ORDER BY roll_no LIMIT {cnt}"
+                        q_t = f"SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', cnic AS 'CNIC', phone AS 'Mobile Number', email AS 'Email' FROM students WHERE session = {pl} AND technology = {pl} ORDER BY roll_no LIMIT {cnt}"
                         df_sub = pd.read_sql(q_t, conn, params=[target_session, t])
                         if not df_sub.empty:
                             all_eligible_list.append(df_sub)
         else:
             for t in target_techs:
-                cursor.execute("SELECT COUNT(*) FROM students WHERE session = ? AND technology = ?", (target_session, t))
-                avail = cursor.fetchone()[0]
+                cursor.execute(f"SELECT COUNT(*) FROM students WHERE session = {pl} AND technology = {pl}", (target_session, t))
+                avail = cursor.fetchone()[0] or 0
                 custom_counts[t] = avail
-                q_t = "SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', cnic AS 'CNIC', phone AS 'Mobile Number', email AS 'Email' FROM students WHERE session = ? AND technology = ? ORDER BY roll_no"
+                q_t = f"SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', cnic AS 'CNIC', phone AS 'Mobile Number', email AS 'Email' FROM students WHERE session = {pl} AND technology = {pl} ORDER BY roll_no"
                 df_sub = pd.read_sql(q_t, conn, params=[target_session, t])
                 if not df_sub.empty:
                     all_eligible_list.append(df_sub)
@@ -4273,11 +4278,12 @@ elif choice == "Recruitment Drive":
                 bouquet_choice = st.selectbox("Welcome Bouquet / Souvenir", ["Bouquets & Souvenir Shields Required", "Bouquet Only", "Shield Only", "Not Required"])
 
             limits_json_str = json.dumps(custom_counts)
-
             save_drive_btn = st.form_submit_button("Save Recruitment Drive Plan")
+            
             if save_drive_btn:
                 if comp_name and emp_focal and target_techs:
-                    cursor.execute("""
+                    ph_insert = ",".join([pl] * 45)
+                    insert_sql = f"""
                     INSERT INTO recruitment_drives (
                         company_name, company_address, job_location, job_title, experience,
                         vacancies_male, vacancies_female, marks_div, salary_range, job_desc,
@@ -4288,8 +4294,9 @@ elif choice == "Recruitment Drive":
                         students_appeared, students_shortlisted,
                         l_coordination, l_staff, l_venue_comfort, l_tech_skills, l_resumes, l_comm_skills, l_dress, l_overall, l_suggestions,
                         candidate_limits_json, budget_utilized, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
+                    ) VALUES ({ph_insert})
+                    """
+                    cursor.execute(insert_sql, (
                         comp_name, comp_address, job_loc, job_title, exp_req,
                         vac_m, vac_f, marks_div, salary_range, job_desc,
                         rec_mode, 1 if eobi_val else 0, 1 if soc_val else 0, 1 if bon_val else 0, acc_mode,
@@ -4343,6 +4350,9 @@ elif choice == "Recruitment Drive":
                 annex_l_tab1 = generate_annexure_l(d_data)
                 st.download_button("📄 Annexure “L” Employer Feedback (.docx)", annex_l_tab1, f"Annexure_L_{comp_name.replace(' ', '_')}.docx")
 
+    # -------------------------------------------------------------------------
+    # TAB 2: ASSESSMENT, FEEDBACK, BUDGET & FINAL SUBMIT (ANNEXURE K OPTIONS)
+    # -------------------------------------------------------------------------
     with rd_tab2:
         df_drives = pd.read_sql("SELECT id, company_name, drive_date, session, target_techs, venue, drive_time, status FROM recruitment_drives ORDER BY id DESC", conn)
         
@@ -4351,7 +4361,7 @@ elif choice == "Recruitment Drive":
             selected_drive_label = st.selectbox("Select Recruitment Drive to Finalize:", list(drive_map.keys()))
             selected_drive_id = drive_map[selected_drive_label]
 
-            cursor.execute("SELECT * FROM recruitment_drives WHERE id = ?", (selected_drive_id,))
+            cursor.execute(f"SELECT * FROM recruitment_drives WHERE id = {pl}", (selected_drive_id,))
             dr_row = cursor.fetchone()
             dr_cols = [d[0] for d in cursor.description]
             dr_data = dict(zip(dr_cols, dr_row))
@@ -4367,20 +4377,64 @@ elif choice == "Recruitment Drive":
             if dr_data.get('participated_cnics_json'):
                 try:
                     saved_part_cnics = json.loads(dr_data['participated_cnics_json'])
-                except:
+                except Exception:
                     saved_part_cnics = []
 
+            # --- 2 OPTIONS SELECTION FOR ANNEXURE K ---
             k_gen_mode = st.radio(
-                "Assessment Sheet Candidate Selection:",
-                ["🎯 Filter by Participated Students (Upload / Paste CNICs)", "📋 Use Default Eligible Roster (From Plan)"],
-                horizontal=True
+                "Assessment Sheet Candidate Selection Source:",
+                [
+                    "📋 Option 1: Use Default Eligible Roster (Database Plan ke Mutabiq)", 
+                    "🎯 Option 2: Filter by Specific Candidates (Temporary Excel/CSV Upload ya Direct Paste)"
+                ],
+                horizontal=True,
+                key=f"k_gen_mode_sel_{selected_drive_id}"
             )
 
-            cand_df = pd.DataFrame(columns=['Roll No', 'Name', 'Technology', 'Session'])
+            cand_df = pd.DataFrame(columns=['Roll No', 'Name', 'Technology', 'Session', 'CNIC'])
             unmatched_k = []
             k_raw_cnics = []
 
-            if k_gen_mode == "🎯 Filter by Participated Students (Upload / Paste CNICs)":
+            # OPTION 1: DEFAULT ELIGIBLE ROSTER FROM DATABASE
+            if k_gen_mode == "📋 Option 1: Use Default Eligible Roster (Database Plan ke Mutabiq)":
+                saved_limits = {}
+                if dr_data.get('candidate_limits_json'):
+                    try:
+                        saved_limits = json.loads(dr_data['candidate_limits_json'])
+                    except Exception:
+                        pass
+
+                all_cand = []
+                for t in dr_data['target_techs']:
+                    cnt_lim = saved_limits.get(t)
+                    q_k = f"SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', cnic AS 'CNIC' FROM students WHERE session = {pl} AND technology = {pl} ORDER BY roll_no"
+                    if cnt_lim and cnt_lim > 0:
+                        q_k += f" LIMIT {cnt_lim}"
+                    df_k_sub = pd.read_sql(q_k, conn, params=[dr_data['session'], t])
+                    if not df_k_sub.empty:
+                        all_cand.append(df_k_sub)
+
+                cand_df = pd.concat(all_cand, ignore_index=True) if all_cand else pd.DataFrame(columns=['Roll No', 'Name', 'Technology', 'Session', 'CNIC'])
+                st.success(f"📋 Roster ke mutabiq total **{len(cand_df)}** Eligible Candidates mojood hain.")
+
+                if not cand_df.empty:
+                    c_save_roster, _ = st.columns([1, 1])
+                    with c_save_roster:
+                        if st.button("💾 Save Default Roster Candidates as Annexure K", key="btn_save_roster_as_part"):
+                            roster_cnics = cand_df['CNIC'].dropna().tolist()
+                            cursor.execute(f"""
+                                UPDATE recruitment_drives 
+                                SET participated_cnics_json = {pl}, students_appeared = {pl}
+                                WHERE id = {pl}
+                            """, (json.dumps(roster_cnics), len(roster_cnics), selected_drive_id))
+                            conn.commit()
+                            dr_data['participated_cnics_json'] = json.dumps(roster_cnics)
+                            dr_data['students_appeared'] = len(roster_cnics)
+                            st.success(f"✅ Roster ke {len(roster_cnics)} Candidates Annexure K ke tor par database mein save ho gaye!")
+                            st.rerun()
+
+            # OPTION 2: TEMPORARY EXCEL/CSV UPLOAD OR DIRECT PASTE
+            else:
                 k_t1, k_t2 = st.tabs(["📁 Upload File (.xlsx / .csv)", "✍️ Paste CNICs Direct"])
 
                 with k_t1:
@@ -4417,7 +4471,7 @@ elif choice == "Recruitment Drive":
                 if k_raw_cnics:
                     target_k_dashed, lookup_k = parse_cnic_input(k_raw_cnics)
                     if lookup_k:
-                        placeholders_k = ",".join("?" * len(lookup_k))
+                        placeholders_k = ",".join([pl] * len(lookup_k))
                         sql_k_query = f"""
                             SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', cnic AS 'CNIC'
                             FROM students 
@@ -4428,35 +4482,35 @@ elif choice == "Recruitment Drive":
                         found_k = set(cand_df['CNIC'].tolist())
                         unmatched_k = [c for c in target_k_dashed if c not in found_k]
 
-                        st.success(f"✅ Total **{len(cand_df)}** Participated Candidates active hain.")
+                        st.success(f"✅ Total **{len(cand_df)}** Specific Candidates active hain.")
                         
                         col_save_k, col_clr_k = st.columns([1, 1])
                         with col_save_k:
                             if st.button("💾 Save Participated Candidates to Database", key="btn_save_part_cands"):
-                                cursor.execute("""
+                                cursor.execute(f"""
                                     UPDATE recruitment_drives 
-                                    SET participated_cnics_json = ?, students_appeared = ?
-                                    WHERE id = ?
+                                    SET participated_cnics_json = {pl}, students_appeared = {pl}
+                                    WHERE id = {pl}
                                 """, (json.dumps(list(found_k)), len(cand_df), selected_drive_id))
                                 conn.commit()
                                 dr_data['participated_cnics_json'] = json.dumps(list(found_k))
                                 dr_data['students_appeared'] = len(cand_df)
-                                st.success(f"✅ {len(cand_df)} Participated Candidates successfully save ho gaye!")
+                                st.success(f"✅ {len(cand_df)} Candidates successfully save ho gaye!")
                                 st.rerun()
 
                         with col_clr_k:
                             if saved_part_cnics:
                                 if st.button("🔄 Clear / Reset Participated List", key="btn_clr_part_cands"):
-                                    cursor.execute("""
+                                    cursor.execute(f"""
                                         UPDATE recruitment_drives 
                                         SET participated_cnics_json = '[]', students_appeared = 0
-                                        WHERE id = ?
+                                        WHERE id = {pl}
                                     """, (selected_drive_id,))
                                     conn.commit()
                                     st.warning("Participated list clear ho gayi hai. Ab aap fresh list daal sakte hain.")
                                     st.rerun()
 
-                        # --- EDIT / REMOVE / ADD SINGLE CANDIDATE SECTION ---
+                        # EDIT / REMOVE / ADD SINGLE CANDIDATE SECTION
                         if not cand_df.empty:
                             with st.expander("🛠️ Edit / Galti Durust Karein (Participated Candidates Management)"):
                                 cand_remove_options = {
@@ -4467,29 +4521,29 @@ elif choice == "Recruitment Drive":
                                 if st.button("❌ Remove Selected Candidate From List", key="btn_remove_single_cand"):
                                     cnic_to_del = cand_remove_options[to_remove_label]
                                     updated_cnics = [c for c in cand_df['CNIC'].tolist() if c != cnic_to_del]
-                                    cursor.execute("""
+                                    cursor.execute(f"""
                                         UPDATE recruitment_drives 
-                                        SET participated_cnics_json = ?, students_appeared = ?
-                                        WHERE id = ?
+                                        SET participated_cnics_json = {pl}, students_appeared = {pl}
+                                        WHERE id = {pl}
                                     """, (json.dumps(updated_cnics), len(updated_cnics), selected_drive_id))
                                     conn.commit()
                                     st.success(f"Candidate {to_remove_label} list se hata diya gaya!")
                                     st.rerun()
 
                                 st.markdown("---")
-                                st.markdown("**➕ Ya koi missing candidate shamil karna chahein:**")
+                                st.markdown("**➕ Missing Candidate Shamil Karein:**")
                                 new_add_cnic = st.text_input("New Student CNIC to Add:", placeholder="33100-1234567-1", key="add_new_part_cnic_input")
                                 if st.button("➕ Add This CNIC to Participated List", key="btn_add_part_single_cnic"):
                                     if new_add_cnic.strip():
                                         _, lookup_new = parse_cnic_input([new_add_cnic.strip()])
                                         if lookup_new:
-                                            cursor.execute("SELECT cnic FROM students WHERE cnic = ?", (lookup_new[0],))
+                                            cursor.execute(f"SELECT cnic FROM students WHERE cnic = {pl}", (lookup_new[0],))
                                             row_verify = cursor.fetchone()
                                             if row_verify:
                                                 curr_cnics = cand_df['CNIC'].tolist()
                                                 if row_verify[0] not in curr_cnics:
                                                     curr_cnics.append(row_verify[0])
-                                                    cursor.execute("UPDATE recruitment_drives SET participated_cnics_json = ?, students_appeared = ? WHERE id = ?", (json.dumps(curr_cnics), len(curr_cnics), selected_drive_id))
+                                                    cursor.execute(f"UPDATE recruitment_drives SET participated_cnics_json = {pl}, students_appeared = {pl} WHERE id = {pl}", (json.dumps(curr_cnics), len(curr_cnics), selected_drive_id))
                                                     conn.commit()
                                                     st.success("Candidate kamyabi se shamil ho gaya!")
                                                     st.rerun()
@@ -4516,52 +4570,15 @@ elif choice == "Recruitment Drive":
                 else:
                     st.info("Barah-e-karam participate karnay walay students ke CNICs upload ya paste karein.")
 
-            else:
-                saved_limits = {}
-                if dr_data.get('candidate_limits_json'):
-                    try:
-                        saved_limits = json.loads(dr_data['candidate_limits_json'])
-                    except:
-                        pass
-
-                all_cand = []
-                for t in dr_data['target_techs']:
-                    cnt_lim = saved_limits.get(t)
-                    q_k = "SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', cnic AS 'CNIC' FROM students WHERE session = ? AND technology = ? ORDER BY roll_no"
-                    if cnt_lim and cnt_lim > 0:
-                        q_k += f" LIMIT {cnt_lim}"
-                    df_k_sub = pd.read_sql(q_k, conn, params=[dr_data['session'], t])
-                    if not df_k_sub.empty:
-                        all_cand.append(df_k_sub)
-
-                cand_df = pd.concat(all_cand, ignore_index=True) if all_cand else pd.DataFrame(columns=['Roll No', 'Name', 'Technology', 'Session', 'CNIC'])
-
-                st.success(f"📋 Roster ke mutabiq total **{len(cand_df)}** Eligible Candidates mojood hain.")
-
-                # OPTION TO SAVE DEFAULT ROSTER AS PARTICIPATED CANDIDATES
-                if not cand_df.empty:
-                    c_save_roster, _ = st.columns([1, 1])
-                    with c_save_roster:
-                        if st.button("💾 Save Default Roster Candidates as Annexure K", key="btn_save_roster_as_part"):
-                            roster_cnics = cand_df['CNIC'].dropna().tolist()
-                            cursor.execute("""
-                                UPDATE recruitment_drives 
-                                SET participated_cnics_json = ?, students_appeared = ?
-                                WHERE id = ?
-                            """, (json.dumps(roster_cnics), len(roster_cnics), selected_drive_id))
-                            conn.commit()
-                            dr_data['participated_cnics_json'] = json.dumps(roster_cnics)
-                            dr_data['students_appeared'] = len(roster_cnics)
-                            st.success(f"✅ Roster ke {len(roster_cnics)} Candidates Annexure K ke tor par database mein save ho gaye!")
-                            st.rerun()
-
-            annex_k_excel = generate_annexure_k_excel(dr_data, cand_df)
-            st.download_button(
-                f"📊 Download Official Annexure “K” Assessment Sheet ({len(cand_df)} Candidates) (.xlsx)",
-                annex_k_excel,
-                f"Annexure_K_{dr_data['company_name'].replace(' ', '_')}.xlsx",
-                key="btn_dl_annex_k_active"
-            )
+            # DOWNLOAD ANNEXURE K EXCEL FILE
+            if not cand_df.empty:
+                annex_k_excel = generate_annexure_k_excel(dr_data, cand_df)
+                st.download_button(
+                    label=f"📊 Download Official Annexure “K” Assessment Sheet ({len(cand_df)} Candidates) (.xlsx)",
+                    data=annex_k_excel,
+                    file_name=f"Annexure_K_{dr_data['company_name'].replace(' ', '_')}.xlsx",
+                    key="btn_dl_annex_k_active"
+                )
 
             st.markdown("---")
             st.markdown("#### 🎯 Post-Interview / Test Finalized Candidates (Selected Students)")
@@ -4571,7 +4588,7 @@ elif choice == "Recruitment Drive":
             if dr_data.get('selected_cnics_json'):
                 try:
                     saved_sel_cnics = json.loads(dr_data['selected_cnics_json'])
-                except:
+                except Exception:
                     saved_sel_cnics = []
 
             fn_t1, fn_t2 = st.tabs(["📁 Upload Finalized Students File", "✍️ Paste Finalized CNICs"])
@@ -4617,7 +4634,7 @@ elif choice == "Recruitment Drive":
             if finalized_raw_cnics:
                 _, fin_lookup = parse_cnic_input(finalized_raw_cnics)
                 if fin_lookup:
-                    fin_placeholders = ",".join("?" * len(fin_lookup))
+                    fin_placeholders = ",".join([pl] * len(fin_lookup))
                     sql_fin = f"""
                         SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', phone AS 'Mobile Number', cnic AS 'CNIC', email AS 'Email'
                         FROM students 
@@ -4632,10 +4649,10 @@ elif choice == "Recruitment Drive":
                     c_save_sel, c_dl_sel = st.columns(2)
                     with c_save_sel:
                         if st.button("💾 Save Selected Candidates to Database", key="btn_save_sel_db"):
-                            cursor.execute("""
+                            cursor.execute(f"""
                                 UPDATE recruitment_drives 
-                                SET selected_cnics_json = ?, students_shortlisted = ?
-                                WHERE id = ?
+                                SET selected_cnics_json = {pl}, students_shortlisted = {pl}
+                                WHERE id = {pl}
                             """, (json.dumps(finalized_students_df['CNIC'].tolist()), len(finalized_students_df), selected_drive_id))
                             conn.commit()
                             dr_data['selected_cnics_json'] = json.dumps(finalized_students_df['CNIC'].tolist())
@@ -4655,7 +4672,6 @@ elif choice == "Recruitment Drive":
                             key="btn_dl_sel_active_excel"
                         )
 
-                    # --- EDIT / REMOVE SINGLE SELECTED CANDIDATE SECTION ---
                     with st.expander("🛠️ Edit Selected / Shortlisted List (Remove Incorrect Candidate)"):
                         sel_remove_options = {
                             f"{r['Roll No']} - {r['Name']} ({r['Technology']}) [{r['CNIC']}]": r['CNIC']
@@ -4665,10 +4681,10 @@ elif choice == "Recruitment Drive":
                         if st.button("❌ Remove From Selected List", key="btn_remove_single_sel"):
                             cnic_sel_del = sel_remove_options[to_remove_sel_label]
                             updated_sel_cnics = [c for c in finalized_students_df['CNIC'].tolist() if c != cnic_sel_del]
-                            cursor.execute("""
+                            cursor.execute(f"""
                                 UPDATE recruitment_drives 
-                                SET selected_cnics_json = ?, students_shortlisted = ?
-                                WHERE id = ?
+                                SET selected_cnics_json = {pl}, students_shortlisted = {pl}
+                                WHERE id = {pl}
                             """, (json.dumps(updated_sel_cnics), len(updated_sel_cnics), selected_drive_id))
                             conn.commit()
                             st.success(f"{to_remove_sel_label} ko selected list se hata diya gaya!")
@@ -4758,7 +4774,6 @@ elif choice == "Recruitment Drive":
                             else:
                                 st.caption("Invalid Phone")
 
-                    st.markdown("---")
                     fin_phones = finalized_students_df['Mobile Number'].dropna().tolist()
                     clean_fin_nums = [format_whatsapp_number(p) for p in fin_phones if format_whatsapp_number(p)]
                     st.text_area(
@@ -4800,15 +4815,15 @@ elif choice == "Recruitment Drive":
                     part_json_val = json.dumps(cand_df['CNIC'].tolist()) if not cand_df.empty and 'CNIC' in cand_df.columns else dr_data.get('participated_cnics_json')
                     sel_json_val = json.dumps(finalized_students_df['CNIC'].tolist()) if not finalized_students_df.empty and 'CNIC' in finalized_students_df.columns else dr_data.get('selected_cnics_json')
 
-                    cursor.execute("""
+                    cursor.execute(f"""
                     UPDATE recruitment_drives SET
-                        students_appeared = ?, students_shortlisted = ?,
-                        l_coordination = ?, l_staff = ?, l_venue_comfort = ?,
-                        l_tech_skills = ?, l_resumes = ?, l_comm_skills = ?, l_dress = ?,
-                        l_overall = ?, l_suggestions = ?, budget_utilized = ?, 
-                        participated_cnics_json = ?, selected_cnics_json = ?,
+                        students_appeared = {pl}, students_shortlisted = {pl},
+                        l_coordination = {pl}, l_staff = {pl}, l_venue_comfort = {pl},
+                        l_tech_skills = {pl}, l_resumes = {pl}, l_comm_skills = {pl}, l_dress = {pl},
+                        l_overall = {pl}, l_suggestions = {pl}, budget_utilized = {pl}, 
+                        participated_cnics_json = {pl}, selected_cnics_json = {pl},
                         status = 'Completed'
-                    WHERE id = ?
+                    WHERE id = {pl}
                     """, (
                         app_count, short_count, coord, staff_h, ven_comf,
                         tech_sk, res_prof, comm_sk, dress_f, over_imp, sugg,
@@ -4831,6 +4846,9 @@ elif choice == "Recruitment Drive":
         else:
             st.info("Pehle Tab 1 se Recruitment Drive plan karein.")
 
+    # -------------------------------------------------------------------------
+    # TAB 3: PERMANENT ARCHIVED RECRUITMENT DRIVES, EDIT & DELETE
+    # -------------------------------------------------------------------------
     with rd_tab3:
         st.markdown("##### 📂 Permanent Archived Recruitment Drives, Edit & Delete")
         df_all_drives = pd.read_sql("SELECT id, company_name, drive_date, job_title, target_techs, session, students_appeared, students_shortlisted, budget_utilized, status FROM recruitment_drives ORDER BY id DESC", conn)
@@ -4841,7 +4859,7 @@ elif choice == "Recruitment Drive":
             st.markdown("###### ⚙️ Manage Archived Drive (Re-download / Edit / Delete)")
             re_did = st.selectbox("Archived Drive Select Karein:", df_all_drives['id'].tolist(), format_func=lambda x: f"ID {x} - {df_all_drives.loc[df_all_drives['id']==x, 'company_name'].values[0]} ({df_all_drives.loc[df_all_drives['id']==x, 'drive_date'].values[0]})")
             
-            cursor.execute("SELECT * FROM recruitment_drives WHERE id = ?", (re_did,))
+            cursor.execute(f"SELECT * FROM recruitment_drives WHERE id = {pl}", (re_did,))
             archive_dr = dict(zip([d[0] for d in cursor.description], cursor.fetchone()))
             archive_dr['target_techs'] = archive_dr['target_techs'].split(",") if archive_dr['target_techs'] else []
 
@@ -4850,13 +4868,13 @@ elif choice == "Recruitment Drive":
             if archive_dr.get('candidate_limits_json'):
                 try:
                     re_saved_limits = json.loads(archive_dr['candidate_limits_json'])
-                except:
+                except Exception:
                     pass
 
             re_cands = []
             for t in archive_dr['target_techs']:
                 cnt_lim = re_saved_limits.get(t)
-                q_k = "SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', cnic AS 'CNIC', phone AS 'Mobile Number', email AS 'Email' FROM students WHERE session = ? AND technology = ? ORDER BY roll_no"
+                q_k = f"SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', cnic AS 'CNIC', phone AS 'Mobile Number', email AS 'Email' FROM students WHERE session = {pl} AND technology = {pl} ORDER BY roll_no"
                 if cnt_lim and cnt_lim > 0:
                     q_k += f" LIMIT {cnt_lim}"
                 df_re_sub = pd.read_sql(q_k, conn, params=[archive_dr['session'], t])
@@ -4865,18 +4883,18 @@ elif choice == "Recruitment Drive":
 
             re_cand_df = pd.concat(re_cands, ignore_index=True) if re_cands else pd.DataFrame(columns=['Roll No', 'Name', 'Technology', 'Session', 'CNIC', 'Mobile Number', 'Email'])
 
-            # 2. Actual Participated Candidates (Loads saved candidates if present)
+            # 2. Actual Participated Candidates
             re_part_df = re_cand_df.copy()
             if archive_dr.get('participated_cnics_json'):
                 try:
                     p_cnics = json.loads(archive_dr['participated_cnics_json'])
                     if p_cnics:
-                        p_holders = ",".join("?" * len(p_cnics))
+                        p_holders = ",".join([pl] * len(p_cnics))
                         q_part = f"SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', cnic AS 'CNIC' FROM students WHERE cnic IN ({p_holders}) ORDER BY technology, roll_no"
                         df_part_loaded = pd.read_sql(q_part, conn, params=p_cnics)
                         if not df_part_loaded.empty:
                             re_part_df = df_part_loaded
-                except:
+                except Exception:
                     pass
 
             # 3. Final Selected Candidates
@@ -4885,10 +4903,10 @@ elif choice == "Recruitment Drive":
                 try:
                     s_cnics = json.loads(archive_dr['selected_cnics_json'])
                     if s_cnics:
-                        s_holders = ",".join("?" * len(s_cnics))
+                        s_holders = ",".join([pl] * len(s_cnics))
                         q_sel = f"SELECT roll_no AS 'Roll No', name AS 'Name', technology AS 'Technology', session AS 'Session', phone AS 'Mobile Number', cnic AS 'CNIC', email AS 'Email' FROM students WHERE cnic IN ({s_holders}) ORDER BY technology, name"
                         re_sel_df = pd.read_sql(q_sel, conn, params=s_cnics)
-                except:
+                except Exception:
                     pass
 
             c_j, c_k, c_l, c_xl = st.columns(4)
@@ -4925,10 +4943,10 @@ elif choice == "Recruitment Drive":
                         e_stat_d = st.selectbox("Status", ["Completed", "Planned"], index=0 if archive_dr['status'] == 'Completed' else 1)
                     
                     if st.form_submit_button("💾 Save Corrected Drive Data"):
-                        cursor.execute("""
+                        cursor.execute(f"""
                             UPDATE recruitment_drives 
-                            SET company_name = ?, job_title = ?, students_appeared = ?, students_shortlisted = ?, budget_utilized = ?, status = ?
-                            WHERE id = ?
+                            SET company_name = {pl}, job_title = {pl}, students_appeared = {pl}, students_shortlisted = {pl}, budget_utilized = {pl}, status = {pl}
+                            WHERE id = {pl}
                         """, (e_comp, e_jtitle, e_app, e_short, e_bud_d, e_stat_d, re_did))
                         conn.commit()
                         st.success("Drive data update ho gaya! Refresh karein.")
@@ -4939,7 +4957,7 @@ elif choice == "Recruitment Drive":
                 confirm_del_d = st.checkbox("Haan, main is recruitment drive ko delete karna chahta hoon", key=f"del_chk_d_{re_did}")
                 if st.button("🔴 Delete This Recruitment Drive", key=f"del_btn_d_{re_did}"):
                     if confirm_del_d:
-                        cursor.execute("DELETE FROM recruitment_drives WHERE id = ?", (re_did,))
+                        cursor.execute(f"DELETE FROM recruitment_drives WHERE id = {pl}", (re_did,))
                         conn.commit()
                         st.success(f"Drive Record ID {re_did} delete ho chuka hai.")
                         st.rerun()
