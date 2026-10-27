@@ -3107,7 +3107,9 @@ elif choice == "Student Directory":
                 params.extend([f"%{search_query.strip()}%", f"%{search_query.strip()}%", f"%{search_query.strip()}%"])
 
         query += " ORDER BY session DESC, technology ASC, rowid DESC LIMIT 1000"
-        df_display = pd.read_sql(query, conn, params=params)
+        # Convert SQLite placeholders (?) to PostgreSQL placeholders (%s) for Supabase
+pg_query = query.replace("?", "%s")
+df_display = pd.read_sql(pg_query, conn, params=params if params else None)
 
         if search_industry.strip() and not df_display.empty:
             st.markdown(f"#### 📊 Placed Candidates Summary in '{search_industry.strip()}'")
