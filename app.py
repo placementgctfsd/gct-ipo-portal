@@ -24,38 +24,47 @@ from psycopg2.extras import RealDictCursor
 # UNIVERSAL DATABASE CONNECTION (SUPABASE / SQLITE)
 # ==========================================
 def get_db_connection():
-    # 1. Agar Streamlit Cloud Secrets mein Supabase URL ho toh Supabase use karega
-    if "postgres" in st.secrets:
+    pg_url = None
+
+    # 1. Pehle Streamlit Secrets se URL uthayein
+    if hasattr(st, "secrets") and "postgres" in st.secrets:
+        pg_url = st.secrets["postgres"].get("url")
+
+    # 2. Agar Secrets na milein toh Local Hardcoded Pooler URL use karein
+    if not pg_url:
+        pg_url = "postgresql://postgres.mcmesfmsshwfxvtkhnoh:APNA_PASSWORD@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
+
+    # 3. Supabase PostgreSQL connect karne ki koshish karein
+    if pg_url:
         try:
-            pg_url = st.secrets["postgres"]["url"]
             conn = psycopg2.connect(pg_url)
             return conn, "postgres"
         except Exception as e:
-            st.error(f"Supabase connection error: {e}")
-            
-    # 2. Local Fallback (Laptop ke liye)
+            st.warning(f"⚠️ Supabase Connect nahi ho saka, Local SQLite use ho raha hai: {e}")
+
+    # 4. Aakhri Fallback (Sirf internet band hone par)
     conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
     return conn, "sqlite"
+
 
 def run_db_query(query, params=(), fetchone=False, fetchall=False, commit=False):
     conn, db_type = get_db_connection()
     c = conn.cursor()
     if db_type == "postgres":
         query = query.replace("?", "%s")
-        
+
     c.execute(query, params)
     res = None
     if fetchone:
         res = c.fetchone()
     elif fetchall:
         res = c.fetchall()
-        
+
     if commit:
         conn.commit()
-        
+
     conn.close()
     return res
-
 # ==========================================
 # EMAIL SENDER SETUP (OTP)
 # ==========================================
