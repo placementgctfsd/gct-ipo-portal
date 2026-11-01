@@ -5,20 +5,23 @@ from sqlalchemy import create_engine
 # 1. Local SQLite connection
 local_conn = sqlite3.connect("ipo_management.db")
 
-# 2. Supabase PostgreSQL connection
-# Note: psycopg2 dialect ke liye postgresql+psycopg2 use hota hai
-SUPABASE_URL = "postgresql+psycopg2://postgres.mcmesfmsshwfxvtkhnoh:IPO%402025%21db@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
+# 2. Supabase PostgreSQL connection (Pooler URL on port 6543)
+SUPABASE_URL = "postgresql+psycopg2://postgres.mcmesfmsshwfxvtkhnoh:IPO%402025!db@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
 
 print("Connecting to Supabase...")
 engine = create_engine(SUPABASE_URL)
 
-# 3. Tables ki list jo transfer karni hain
+# 3. Aapke local database ke exact tables ki list
 tables = [
     "students", 
+    "activities",
+    "activity_participants",
     "recruitment_drives", 
-    "student_traceability", 
     "guest_lectures", 
-    "industrial_visits"
+    "industry_visits",
+    "monthly_activity_plans",
+    "traceability_forms",
+    "system_users"
 ]
 
 # Check existing tables in local DB
