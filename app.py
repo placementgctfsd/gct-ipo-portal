@@ -33,7 +33,7 @@ def get_db_connection():
 
     # 2. Agar Secrets na milein toh Local Hardcoded Pooler URL use karein
     if not pg_url:
-        pg_url = "postgresql://postgres.mcmesfmsshwfxvtkhnoh:APNA_PASSWORD@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
+        pg_url = "postgresql://postgres.mcmesfmsshwfxvtkhnoh:rcPiJjPU5wFrt7mV@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
 
     # 3. Supabase PostgreSQL connect karne ki koshish karein
     if pg_url:
@@ -171,6 +171,66 @@ if st.sidebar.button("Logout"):
     st.session_state["logged_in"] = False
     st.session_state["user_info"] = None
     st.rerun()
+st.sidebar.markdown("---")
+
+# ==========================================
+# DATABASE SYNC FROM CLOUD (SIDEBAR BUTTON)
+# ==========================================
+st.sidebar.subheader("🔄 Database Sync")
+if st.sidebar.button("Sync Data from Cloud"):
+    with st.spinner("Syncing data from Supabase Cloud to Local SQLite..."):
+        try:
+            pg_url = None
+            if hasattr(st, "secrets") and "postgres" in st.secrets:
+                pg_url = st.secrets["postgres"].get("url")
+            if not pg_url:
+                pg_url = "postgresql://postgres.mcmesfmsshwfxvtkhnoh:rcPiJjPU5wFrt7mV@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
+            
+            pg_conn = psycopg2.connect(pg_url)
+            pg_cursor = pg_conn.cursor()
+            
+            sqlite_conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
+            sqlite_cursor = sqlite_conn.cursor()
+            
+            tables = [
+                "system_users",
+                "students",
+                "traceability_forms",
+                "activities",
+                "guest_lectures",
+                "industry_visits",
+                "recruitment_drives",
+                "monthly_activity_plans"
+            ]
+            total_synced = 0
+            
+            for table in tables:
+                try:
+                    pg_cursor.execute(f"SELECT * FROM {table}")
+                    rows = pg_cursor.fetchall()
+                    if rows:
+                        col_names = [desc[0] for desc in pg_cursor.description]
+                        placeholders = ", ".join(["?" for _ in col_names])
+                        cols_str = ", ".join(col_names)
+                        
+                        for row in rows:
+                            clean_row = [bytes(val) if isinstance(val, memoryview) else val for val in row]
+                            sqlite_cursor.execute(
+                                f"INSERT OR REPLACE INTO {table} ({cols_str}) VALUES ({placeholders})",
+                                clean_row
+                            )
+                        sqlite_conn.commit()
+                        total_synced += len(rows)
+                except Exception as t_err:
+                    print(f"Table {table} sync skipped: {t_err}")
+            
+            pg_cursor.close()
+            pg_conn.close()
+            sqlite_conn.close()
+            st.sidebar.success(f"✅ Sync Successful! Total records updated: {total_synced}")
+            st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"❌ Sync Failed: {e}")
 st.sidebar.markdown("---")
 
 # ==========================================
