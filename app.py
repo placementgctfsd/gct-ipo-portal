@@ -22,48 +22,141 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 # ==========================================
-# UNIVERSAL DATABASE CONNECTION (SUPABASE / SQLITE)
+# DIRECT SUPABASE POSTGRESQL ENGINE (UNIFIED SINGLE DB)
 # ==========================================
-def get_db_connection():
+def get_pg_url():
     pg_url = None
-
-    # 1. Pehle Streamlit Secrets se URL uthayein
     if hasattr(st, "secrets") and "postgres" in st.secrets:
         pg_url = st.secrets["postgres"].get("url")
-
-    # 2. Agar Secrets na milein toh Local Hardcoded Pooler URL use karein
     if not pg_url:
-        pg_url = "postgresql://postgres.mcmesfmsshwfxvtkhnoh:rcPiJjPU5wFrt7mV@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
+        pg_url = "postgresql://postgres.mcmesfmsshwfxvtkhnoh:rcPiJjPU5wFrt7mV@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
+    return pg_url
 
-    # 3. Supabase PostgreSQL connect karne ki koshish karein
-    if pg_url:
+def _translate_sql_for_pg(sql):
+    s = str(sql)
+    # 1. Replace ? placeholders with %s
+    s = s.replace("?", "%s")
+    # 2. Translate SQLite rowid ordering to PostgreSQL ctid
+    s = re.sub(r"\browid\b", "ctid", s, flags=re.IGNORECASE)
+    # 3. Translate SQLite 'Alias' single-quoted column aliases to double-quoted "Alias"
+    s = re.sub(r"\bAS\s+'([^']+)'", r'AS "\1"', s, flags=re.IGNORECASE)
+    # 4. Translate INSERT OR IGNORE INTO students (...) VALUES (...)
+    if re.search(r"INSERT\s+OR\s+IGNORE\s+INTO\s+students", s, flags=re.IGNORECASE):
+        s = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", s, flags=re.IGNORECASE)
+        if "ON CONFLICT" not in s.upper():
+            s = s.rstrip().rstrip(";") + " ON CONFLICT (cnic) DO NOTHING"
+    # 5. Translate INSERT OR REPLACE INTO students (cols) VALUES (...)
+    m_rep = re.search(r"INSERT\s+OR\s+REPLACE\s+INTO\s+students\s*\(([^)]+)\)", s, flags=re.IGNORECASE)
+    if m_rep:
+        cols = [c.strip() for c in m_rep.group(1).split(",")]
+        non_pk = [c for c in cols if c.lower() != "cnic"]
+        set_clause = ", ".join([f"{c} = EXCLUDED.{c}" for c in non_pk])
+        s = re.sub(r"INSERT\s+OR\s+REPLACE\s+INTO", "INSERT INTO", s, flags=re.IGNORECASE)
+        if "ON CONFLICT" not in s.upper():
+            s = s.rstrip().rstrip(";") + f" ON CONFLICT (cnic) DO UPDATE SET {set_clause}"
+    return s
+
+class PgCompatCursor:
+    def __init__(self, raw_cursor):
+        self._cur = raw_cursor
+
+    def execute(self, query, params=None):
+        pg_q = _translate_sql_for_pg(query)
+        if params is not None:
+            clean_params = tuple(
+                psycopg2.Binary(p) if isinstance(p, (bytes, bytearray, memoryview)) else p
+                for p in params
+            )
+            return self._cur.execute(pg_q, clean_params)
+        return self._cur.execute(pg_q)
+
+    def executemany(self, query, seq_of_params):
+        pg_q = _translate_sql_for_pg(query)
+        clean_seq = [
+            tuple(psycopg2.Binary(p) if isinstance(p, (bytes, bytearray, memoryview)) else p for p in row)
+            for row in seq_of_params
+        ]
+        return self._cur.executemany(pg_q, clean_seq)
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        if row is None:
+            return None
+        return tuple(bytes(v) if isinstance(v, memoryview) else v for v in row)
+
+    def fetchall(self):
+        rows = self._cur.fetchall()
+        return [
+            tuple(bytes(v) if isinstance(v, memoryview) else v for v in r)
+            for r in rows
+        ]
+
+    @property
+    def description(self):
+        return self._cur.description
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    def close(self):
+        return self._cur.close()
+
+class PgCompatConnection:
+    def __init__(self, pg_url):
+        self._pg_url = pg_url
+        self._conn = psycopg2.connect(pg_url)
+
+    def _ensure_open(self):
         try:
-            conn = psycopg2.connect(pg_url)
-            return conn, "postgres"
-        except Exception as e:
-            st.warning(f"⚠️ Supabase Connect nahi ho saka, Local SQLite use ho raha hai: {e}")
+            if self._conn is None or self._conn.closed != 0:
+                self._conn = psycopg2.connect(self._pg_url)
+        except Exception:
+            self._conn = psycopg2.connect(self._pg_url)
 
-    # 4. Aakhri Fallback (Sirf internet band hone par)
-    conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
-    return conn, "sqlite"
+    def cursor(self):
+        self._ensure_open()
+        return PgCompatCursor(self._conn.cursor())
 
+    def commit(self):
+        self._ensure_open()
+        return self._conn.commit()
+
+    def rollback(self):
+        try:
+            if self._conn and self._conn.closed == 0:
+                return self._conn.rollback()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            if self._conn and self._conn.closed == 0:
+                self._conn.close()
+        except Exception:
+            pass
+
+def get_db_connection():
+    pg_url = get_pg_url()
+    try:
+        conn = PgCompatConnection(pg_url)
+        return conn, "postgres"
+    except Exception as e:
+        st.error(f"⚠️ Supabase Cloud Connection Error: {e}")
+        conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
+        return conn, "sqlite"
 
 def run_db_query(query, params=(), fetchone=False, fetchall=False, commit=False):
     conn, db_type = get_db_connection()
     c = conn.cursor()
-    if db_type == "postgres":
-        query = query.replace("?", "%s")
-
     c.execute(query, params)
     res = None
     if fetchone:
         res = c.fetchone()
     elif fetchall:
         res = c.fetchall()
-
     if commit:
         conn.commit()
-
     conn.close()
     return res
 # ==========================================
@@ -174,63 +267,64 @@ if st.sidebar.button("Logout"):
 st.sidebar.markdown("---")
 
 # ==========================================
-# DATABASE SYNC FROM CLOUD (SIDEBAR BUTTON)
+# LIVE SUPABASE CLOUD STATUS & ONE-TIME MIGRATION
 # ==========================================
-st.sidebar.subheader("🔄 Database Sync")
-if st.sidebar.button("Sync Data from Cloud"):
-    with st.spinner("Syncing data from Supabase Cloud to Local SQLite..."):
-        try:
-            pg_url = None
-            if hasattr(st, "secrets") and "postgres" in st.secrets:
-                pg_url = st.secrets["postgres"].get("url")
-            if not pg_url:
-                pg_url = "postgresql://postgres.mcmesfmsshwfxvtkhnoh:rcPiJjPU5wFrt7mV@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
-            
-            pg_conn = psycopg2.connect(pg_url)
-            pg_cursor = pg_conn.cursor()
-            
-            sqlite_conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
-            sqlite_cursor = sqlite_conn.cursor()
-            
-            tables = [
-                "system_users",
-                "students",
-                "traceability_forms",
-                "activities",
-                "guest_lectures",
-                "industry_visits",
-                "recruitment_drives",
-                "monthly_activity_plans"
-            ]
-            total_synced = 0
-            
-            for table in tables:
+st.sidebar.success("☁️ Live Connected: Supabase Cloud DB")
+if os.path.exists("ipo_management.db"):
+    with st.sidebar.expander("📤 One-Time Local DB Upload"):
+        st.caption("Agar aapke paas local `ipo_management.db` mein koi data hai jo Supabase par bhejna hai toh ek dafa click karein:")
+        if st.button("Upload Local DB to Supabase"):
+            with st.spinner("Uploading local records to Supabase Cloud..."):
                 try:
-                    pg_cursor.execute(f"SELECT * FROM {table}")
-                    rows = pg_cursor.fetchall()
-                    if rows:
-                        col_names = [desc[0] for desc in pg_cursor.description]
-                        placeholders = ", ".join(["?" for _ in col_names])
-                        cols_str = ", ".join(col_names)
-                        
-                        for row in rows:
-                            clean_row = [bytes(val) if isinstance(val, memoryview) else val for val in row]
-                            sqlite_cursor.execute(
-                                f"INSERT OR REPLACE INTO {table} ({cols_str}) VALUES ({placeholders})",
-                                clean_row
-                            )
-                        sqlite_conn.commit()
-                        total_synced += len(rows)
-                except Exception as t_err:
-                    print(f"Table {table} sync skipped: {t_err}")
-            
-            pg_cursor.close()
-            pg_conn.close()
-            sqlite_conn.close()
-            st.sidebar.success(f"✅ Sync Successful! Total records updated: {total_synced}")
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"❌ Sync Failed: {e}")
+                    pg_conn = psycopg2.connect(get_pg_url())
+                    pg_cursor = pg_conn.cursor()
+                    sqlite_conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
+                    sqlite_cursor = sqlite_conn.cursor()
+                    _MIG_TABLES = [
+                        ("system_users", "username"),
+                        ("students", "cnic"),
+                        ("traceability_forms", "id"),
+                        ("activities", "id"),
+                        ("guest_lectures", "id"),
+                        ("industry_visits", "id"),
+                        ("recruitment_drives", "id"),
+                        ("monthly_activity_plans", "id")
+                    ]
+                    total_up = 0
+                    for table, pk_col in _MIG_TABLES:
+                        try:
+                            sqlite_cursor.execute(f"SELECT * FROM {table}")
+                            rows = sqlite_cursor.fetchall()
+                            col_names = [desc[0] for desc in sqlite_cursor.description]
+                            if rows:
+                                pg_cursor.execute("SAVEPOINT sp_mig")
+                                try:
+                                    placeholders = ", ".join(["%s" for _ in col_names])
+                                    cols_str = ", ".join(col_names)
+                                    non_pk = [c for c in col_names if c != pk_col]
+                                    upd_clause = ", ".join([f"{c} = EXCLUDED.{c}" for c in non_pk])
+                                    conflict_sql = f"ON CONFLICT ({pk_col}) DO UPDATE SET {upd_clause}" if non_pk else f"ON CONFLICT ({pk_col}) DO NOTHING"
+                                    for row in rows:
+                                        clean_row = [psycopg2.Binary(val) if isinstance(val, (bytes, bytearray)) else val for val in row]
+                                        pg_cursor.execute(
+                                            f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders}) {conflict_sql}",
+                                            clean_row
+                                        )
+                                    pg_cursor.execute("RELEASE SAVEPOINT sp_mig")
+                                    total_up += len(rows)
+                                except Exception as inner_e:
+                                    pg_cursor.execute("ROLLBACK TO SAVEPOINT sp_mig")
+                                    print(f"Migration skipped for {table}: {inner_e}")
+                        except Exception as t_err:
+                            print(f"Local table {table} read skipped: {t_err}")
+                    pg_conn.commit()
+                    pg_cursor.close()
+                    pg_conn.close()
+                    sqlite_conn.close()
+                    st.sidebar.success(f"✅ {total_up} records Supabase Cloud par save ho gaye!")
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"❌ Upload Failed: {e}")
 st.sidebar.markdown("---")
 
 # ==========================================
@@ -262,14 +356,15 @@ if st.session_state["user_info"]["role"] == "Administrator":
         
         if st.button("Create User"):
             if new_u and new_p:
-                conn_u = sqlite3.connect("ipo_management.db")
+                conn_u, _ = get_db_connection()
                 c_u = conn_u.cursor()
                 p_hash = hashlib.sha256(str.encode(new_p)).hexdigest()
                 try:
-                    c_u.execute("INSERT INTO system_users VALUES (?, ?, ?, ?)", (new_u.strip().lower(), new_n, p_hash, new_role))
+                    c_u.execute("INSERT INTO system_users (username, name, password_hash, role) VALUES (?, ?, ?, ?)", (new_u.strip().lower(), new_n, p_hash, new_role))
                     conn_u.commit()
                     st.success(f"User '{new_u}' ban gaya!")
-                except:
+                except Exception:
+                    conn_u.rollback()
                     st.error("Yeh username pehle se mojood hai.")
                 conn_u.close()
                 st.rerun()
@@ -278,7 +373,7 @@ if st.session_state["user_info"]["role"] == "Administrator":
 
         st.markdown("---")
         st.markdown("#### Mojooda Users")
-        conn_u = sqlite3.connect("ipo_management.db")
+        conn_u, _ = get_db_connection()
         c_u = conn_u.cursor()
         c_u.execute("SELECT username, name, role FROM system_users WHERE role != 'Administrator'")
         all_users = c_u.fetchall()
@@ -288,7 +383,7 @@ if st.session_state["user_info"]["role"] == "Administrator":
             col_a, col_b = st.columns([3, 1])
             col_a.write(f"**{u[1]}** (`{u[0]}`)\n*{u[2]}*")
             if col_b.button("❌", key=f"del_user_{u[0]}"):
-                conn_u = sqlite3.connect("ipo_management.db")
+                conn_u, _ = get_db_connection()
                 c_u = conn_u.cursor()
                 c_u.execute("DELETE FROM system_users WHERE username = ?", (u[0],))
                 conn_u.commit()
@@ -2554,13 +2649,30 @@ def render_comm_charges_html(app_data):
     """
     return html_page
 
-# ----------------- Database Setup & Migrations -----------------
+# ----------------- Database Setup & Migrations (DIRECT SUPABASE) -----------------
 
-conn = sqlite3.connect("ipo_management.db", check_same_thread=False)
+@st.cache_resource
+def init_main_db_connection():
+    return get_db_connection()
+
+conn, _active_db_type = init_main_db_connection()
 cursor = conn.cursor()
 
+# Wrap pd.read_sql so every DataFrame query automatically works seamlessly on Supabase PostgreSQL
+_orig_pd_read_sql = pd.read_sql
+def _pg_safe_read_sql(sql, con, *args, **kwargs):
+    if isinstance(con, PgCompatConnection):
+        con._ensure_open()
+        pg_sql = _translate_sql_for_pg(sql)
+        params = kwargs.get("params")
+        if params is not None and isinstance(params, list):
+            kwargs["params"] = tuple(params)
+        return _orig_pd_read_sql(pg_sql, con._conn, *args, **kwargs)
+    return _orig_pd_read_sql(sql, con, *args, **kwargs)
+pd.read_sql = _pg_safe_read_sql
+
 # Database Type Detection (PostgreSQL / Supabase vs SQLite)
-is_postgres = "psycopg2" in str(type(cursor)).lower() or "postgres" in str(type(conn)).lower()
+is_postgres = (_active_db_type == "postgres")
 pk_auto = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
 blob_type = "BYTEA" if is_postgres else "BLOB"
 
@@ -3508,7 +3620,8 @@ elif choice == "Student Entry":
                     )
                     conn.commit()
                     st.success(f"Student '{name}' kamyabi se save ho gaya!")
-                except sqlite3.IntegrityError:
+                except (sqlite3.IntegrityError, psycopg2.IntegrityError):
+                    conn.rollback()
                     st.error("Yeh CNIC pehle se database mein mojood hai!")
 
 # =========================================================================
