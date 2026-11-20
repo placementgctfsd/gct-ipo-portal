@@ -58,26 +58,59 @@ def _translate_sql_for_pg(sql):
     return s
 
 class PgCompatCursor:
-    def __init__(self, raw_cursor):
+    def __init__(self, raw_cursor, raw_conn=None):
         self._cur = raw_cursor
+        self._conn = raw_conn
+
+    def _rollback_if_in_error(self):
+        if self._conn is not None:
+            try:
+                if getattr(self._conn, "closed", 1) == 0:
+                    info = getattr(self._conn, "info", None)
+                    # psycopg2 transaction_status == 4 -> INERROR (aborted transaction)
+                    if info is not None and getattr(info, "transaction_status", None) == 4:
+                        self._conn.rollback()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+
+    def _safe_rollback(self):
+        if self._conn is not None:
+            try:
+                if getattr(self._conn, "closed", 1) == 0:
+                    self._conn.rollback()
+            except Exception:
+                pass
 
     def execute(self, query, params=None):
         pg_q = _translate_sql_for_pg(query)
-        if params is not None:
-            clean_params = tuple(
-                psycopg2.Binary(p) if isinstance(p, (bytes, bytearray, memoryview)) else p
-                for p in params
-            )
-            return self._cur.execute(pg_q, clean_params)
-        return self._cur.execute(pg_q)
+        self._rollback_if_in_error()
+        try:
+            if params is not None:
+                clean_params = tuple(
+                    psycopg2.Binary(p) if isinstance(p, (bytes, bytearray, memoryview)) else p
+                    for p in params
+                )
+                return self._cur.execute(pg_q, clean_params)
+            return self._cur.execute(pg_q)
+        except Exception:
+            self._safe_rollback()
+            raise
 
     def executemany(self, query, seq_of_params):
         pg_q = _translate_sql_for_pg(query)
-        clean_seq = [
-            tuple(psycopg2.Binary(p) if isinstance(p, (bytes, bytearray, memoryview)) else p for p in row)
-            for row in seq_of_params
-        ]
-        return self._cur.executemany(pg_q, clean_seq)
+        self._rollback_if_in_error()
+        try:
+            clean_seq = [
+                tuple(psycopg2.Binary(p) if isinstance(p, (bytes, bytearray, memoryview)) else p for p in row)
+                for row in seq_of_params
+            ]
+            return self._cur.executemany(pg_q, clean_seq)
+        except Exception:
+            self._safe_rollback()
+            raise
 
     def fetchone(self):
         row = self._cur.fetchone()
@@ -106,18 +139,24 @@ class PgCompatCursor:
 class PgCompatConnection:
     def __init__(self, pg_url):
         self._pg_url = pg_url
-        self._conn = psycopg2.connect(pg_url, connect_timeout=10)
+        self._conn = psycopg2.connect(pg_url, connect_timeout=4, keepalives=1, keepalives_idle=20, keepalives_interval=10, keepalives_count=3)
 
     def _ensure_open(self):
         try:
             if self._conn is None or self._conn.closed != 0:
-                self._conn = psycopg2.connect(self._pg_url, connect_timeout=10)
+                self._conn = psycopg2.connect(self._pg_url, connect_timeout=4, keepalives=1, keepalives_idle=20, keepalives_interval=10, keepalives_count=3)
+            elif getattr(self._conn, "info", None) is not None and getattr(self._conn.info, "transaction_status", None) == 4:
+                self._conn.rollback()
         except Exception:
-            self._conn = psycopg2.connect(self._pg_url, connect_timeout=10)
+            try:
+                if self._conn is not None and getattr(self._conn, "closed", 1) == 0:
+                    self._conn.rollback()
+            except Exception:
+                self._conn = psycopg2.connect(self._pg_url, connect_timeout=4, keepalives=1, keepalives_idle=20, keepalives_interval=10, keepalives_count=3)
 
     def cursor(self):
         self._ensure_open()
-        return PgCompatCursor(self._conn.cursor())
+        return PgCompatCursor(self._conn.cursor(), self._conn)
 
     def commit(self):
         self._ensure_open()
@@ -202,10 +241,15 @@ def send_otp_email(to_email, otp_code):
 # ==========================================
 # AUTHENTICATION & LOGIN LOGIC
 # ==========================================
+@st.cache_data(ttl=120, show_spinner=False)
+def _verify_user_hash_cached(u_clean, p_hash):
+    query = "SELECT username, name, role FROM system_users WHERE username = ? AND password_hash = ?"
+    return run_db_query(query, (u_clean, p_hash), fetchone=True)
+
 def check_user_login(username, password):
     p_hash = hashlib.sha256(str.encode(password)).hexdigest()
-    query = "SELECT username, name, role FROM system_users WHERE username = ? AND password_hash = ?"
-    res = run_db_query(query, (username.strip().lower(), p_hash), fetchone=True)
+    u_clean = username.strip().lower()
+    res = _verify_user_hash_cached(u_clean, p_hash)
     if res:
         return {"username": res[0], "name": res[1], "role": res[2]}
     return None
