@@ -139,12 +139,12 @@ class PgCompatCursor:
 class PgCompatConnection:
     def __init__(self, pg_url):
         self._pg_url = pg_url
-        self._conn = psycopg2.connect(pg_url, connect_timeout=4, keepalives=1, keepalives_idle=20, keepalives_interval=10, keepalives_count=3)
+        self._conn = psycopg2.connect(pg_url, connect_timeout=3, keepalives=1, keepalives_idle=20, keepalives_interval=10, keepalives_count=3)
 
     def _ensure_open(self):
         try:
             if self._conn is None or self._conn.closed != 0:
-                self._conn = psycopg2.connect(self._pg_url, connect_timeout=4, keepalives=1, keepalives_idle=20, keepalives_interval=10, keepalives_count=3)
+                self._conn = psycopg2.connect(self._pg_url, connect_timeout=3, keepalives=1, keepalives_idle=20, keepalives_interval=10, keepalives_count=3)
             elif getattr(self._conn, "info", None) is not None and getattr(self._conn.info, "transaction_status", None) == 4:
                 self._conn.rollback()
         except Exception:
@@ -152,7 +152,7 @@ class PgCompatConnection:
                 if self._conn is not None and getattr(self._conn, "closed", 1) == 0:
                     self._conn.rollback()
             except Exception:
-                self._conn = psycopg2.connect(self._pg_url, connect_timeout=4, keepalives=1, keepalives_idle=20, keepalives_interval=10, keepalives_count=3)
+                self._conn = psycopg2.connect(self._pg_url, connect_timeout=3, keepalives=1, keepalives_idle=20, keepalives_interval=10, keepalives_count=3)
 
     def cursor(self):
         self._ensure_open()
@@ -3104,13 +3104,17 @@ pd.read_sql = _pg_safe_read_sql
 
 @st.cache_resource(show_spinner=False)
 def _ensure_database_schema_once():
-    s_conn, s_db_type = get_db_connection()
-    s_cur = s_conn.cursor()
-    _is_pg = (s_db_type == "postgres")
-    _pk_auto = "SERIAL PRIMARY KEY" if _is_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    _blob_type = "BYTEA" if _is_pg else "BLOB"
-    _run_schema_migrations(s_conn, s_cur, _pk_auto, _blob_type)
-    return True
+    try:
+        s_conn, s_db_type = get_db_connection()
+        s_cur = s_conn.cursor()
+        _is_pg = (s_db_type == "postgres")
+        _pk_auto = "SERIAL PRIMARY KEY" if _is_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        _blob_type = "BYTEA" if _is_pg else "BLOB"
+        _run_schema_migrations(s_conn, s_cur, _pk_auto, _blob_type)
+        return True
+    except Exception as e:
+        print("Schema init skipped on startup:", e)
+        return False
 
 def _repair_null_ids_for_table(conn, cursor, table_name):
     """Assign positive IDs to NULL rows, attach sequence/identity default for future inserts, and enable REPLICA IDENTITY."""
