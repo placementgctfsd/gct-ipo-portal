@@ -3113,10 +3113,12 @@ def _ensure_database_schema_once():
     return True
 
 def _repair_null_ids_for_table(conn, cursor, table_name):
-    """Assign positive IDs to any rows where id IS NULL and sync PostgreSQL serial sequence."""
+    """Assign positive IDs to NULL rows, attach sequence/identity default for future inserts, and enable REPLICA IDENTITY."""
     try:
         raw_pg = getattr(conn, "_conn", conn)
         cur = raw_pg.cursor() if hasattr(raw_pg, "cursor") else cursor
+
+        # 1. Backfill any rows where id IS NULL
         cur.execute(f"SELECT ctid FROM {table_name} WHERE id IS NULL")
         null_rows = cur.fetchall()
         cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table_name} WHERE id IS NOT NULL")
@@ -3128,14 +3130,57 @@ def _repair_null_ids_for_table(conn, cursor, table_name):
             cur.execute(f"UPDATE {table_name} SET id = %s WHERE ctid = %s AND id IS NULL", (next_id, ctid_val))
             next_id += 1
             fixed += 1
+
+        # 2. Ensure sequence + DEFAULT nextval exists so every new INSERT automatically gets next ID
+        seq_name = f"{table_name}_id_seq"
+        cur.execute("SAVEPOINT sp_seq_setup")
+        try:
+            cur.execute(f"SELECT pg_get_serial_sequence('{table_name}', 'id')")
+            existing_seq = cur.fetchone()
+            if not existing_seq or not existing_seq[0]:
+                cur.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq_name}")
+                cur.execute(f"ALTER TABLE {table_name} ALTER COLUMN id SET DEFAULT nextval('{seq_name}')")
+                cur.execute(f"ALTER SEQUENCE {seq_name} OWNED BY {table_name}.id")
+            cur.execute("RELEASE SAVEPOINT sp_seq_setup")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_seq_setup")
+
+        # 3. Sync sequence to current MAX(id)
+        cur.execute("SAVEPOINT sp_seq_val")
         try:
             cur.execute(
-                f"SELECT setval(pg_get_serial_sequence('{table_name}', 'id'), GREATEST(COALESCE((SELECT MAX(id) FROM {table_name} WHERE id IS NOT NULL), 0), 1), (SELECT COALESCE(MAX(id), 0) > 0 FROM {table_name}))"
+                f"SELECT setval(COALESCE(pg_get_serial_sequence('{table_name}', 'id'), '{seq_name}'), "
+                f"GREATEST(COALESCE((SELECT MAX(id) FROM {table_name} WHERE id IS NOT NULL), 0), 1), "
+                f"(SELECT COALESCE(MAX(id), 0) > 0 FROM {table_name}))"
             )
+            cur.execute("RELEASE SAVEPOINT sp_seq_val")
         except Exception:
-            pass
+            cur.execute("ROLLBACK TO SAVEPOINT sp_seq_val")
+
+        # 4. Ensure NOT NULL + PRIMARY KEY (or REPLICA IDENTITY FULL) so DELETE never fails
+        cur.execute("SAVEPOINT sp_pk_rep")
+        try:
+            cur.execute(f"ALTER TABLE {table_name} ALTER COLUMN id SET NOT NULL")
+            cur.execute("RELEASE SAVEPOINT sp_pk_rep")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_pk_rep")
+
+        cur.execute("SAVEPOINT sp_add_pk_tbl")
+        try:
+            cur.execute(f"ALTER TABLE {table_name} ADD PRIMARY KEY (id)")
+            cur.execute("RELEASE SAVEPOINT sp_add_pk_tbl")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_add_pk_tbl")
+
+        cur.execute("SAVEPOINT sp_rep_full")
+        try:
+            cur.execute(f"ALTER TABLE {table_name} REPLICA IDENTITY FULL")
+            cur.execute("RELEASE SAVEPOINT sp_rep_full")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_rep_full")
+
+        raw_pg.commit()
         if fixed > 0:
-            raw_pg.commit()
             try:
                 st.cache_data.clear()
             except Exception:
@@ -5613,6 +5658,7 @@ elif choice == "Recruitment Drive":
                         'refreshment_heads': ref_heads, 'backdrop_details': backdrop_choice,
                         'bouquet_details': bouquet_choice
                     }
+                    _repair_null_drive_ids(conn, cursor, pl)
                     drive_app_blob = compress_file_bytes(generate_drive_principal_application(drive_app_payload).getvalue())
                     ph_insert = ",".join([pl] * 46)
                     insert_sql = f"""
@@ -6441,10 +6487,34 @@ elif choice == "Recruitment Drive":
                 confirm_del_d = st.checkbox("Haan, main is recruitment drive ko delete karna chahta hoon", key=f"del_chk_d_{re_did}")
                 if st.button("🔴 Delete This Recruitment Drive", key=f"del_btn_d_{re_did}"):
                     if confirm_del_d:
-                        cursor.execute(f"DELETE FROM recruitment_drives WHERE id = {pl}", (re_did,))
-                        conn.commit()
-                        st.success(f"Drive Record ID {re_did} delete ho chuka hai.")
-                        st.rerun()
+                        try:
+                            raw_pg = getattr(conn, "_conn", conn)
+                            cur = raw_pg.cursor() if hasattr(raw_pg, "cursor") else cursor
+                            try:
+                                cur.execute("ALTER TABLE recruitment_drives REPLICA IDENTITY FULL")
+                            except Exception:
+                                pass
+                            if re_did is not None:
+                                cur.execute("DELETE FROM recruitment_drives WHERE id = %s", (int(re_did),))
+                            else:
+                                cur.execute(
+                                    "DELETE FROM recruitment_drives WHERE id IS NULL AND COALESCE(company_name,'') = %s AND COALESCE(drive_date,'') = %s",
+                                    (_sel_meta.get("company_name", ""), _sel_meta.get("drive_date", ""))
+                                )
+                            raw_pg.commit()
+                            try:
+                                st.cache_data.clear()
+                            except Exception:
+                                pass
+                            st.success(f"Drive Record ID {re_did} delete ho chuka hai.")
+                            st.rerun()
+                        except Exception as del_err:
+                            try:
+                                raw_pg = getattr(conn, "_conn", conn)
+                                raw_pg.rollback()
+                            except Exception:
+                                pass
+                            st.error(f"Delete error: {del_err}")
                     else:
                         st.error("Pehle confirmation check karein.")
         else:
