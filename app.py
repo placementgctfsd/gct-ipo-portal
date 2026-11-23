@@ -3112,6 +3112,47 @@ def _ensure_database_schema_once():
     _run_schema_migrations(s_conn, s_cur, _pk_auto, _blob_type)
     return True
 
+def _repair_null_ids_for_table(conn, cursor, table_name):
+    """Assign positive IDs to any rows where id IS NULL and sync PostgreSQL serial sequence."""
+    try:
+        raw_pg = getattr(conn, "_conn", conn)
+        cur = raw_pg.cursor() if hasattr(raw_pg, "cursor") else cursor
+        cur.execute(f"SELECT ctid FROM {table_name} WHERE id IS NULL")
+        null_rows = cur.fetchall()
+        cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table_name} WHERE id IS NOT NULL")
+        max_row = cur.fetchone()
+        next_id = int((max_row[0] if max_row else 0) or 0) + 1
+        fixed = 0
+        for r in (null_rows or []):
+            ctid_val = r[0]
+            cur.execute(f"UPDATE {table_name} SET id = %s WHERE ctid = %s AND id IS NULL", (next_id, ctid_val))
+            next_id += 1
+            fixed += 1
+        try:
+            cur.execute(
+                f"SELECT setval(pg_get_serial_sequence('{table_name}', 'id'), GREATEST(COALESCE((SELECT MAX(id) FROM {table_name} WHERE id IS NOT NULL), 0), 1), (SELECT COALESCE(MAX(id), 0) > 0 FROM {table_name}))"
+            )
+        except Exception:
+            pass
+        if fixed > 0:
+            raw_pg.commit()
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+        return fixed
+    except Exception as e:
+        print(f"Repair null ids error on {table_name}:", e)
+        try:
+            raw_pg = getattr(conn, "_conn", conn)
+            raw_pg.rollback()
+        except Exception:
+            pass
+        return 0
+
+def _repair_null_drive_ids(conn, cursor, pl):
+    return _repair_null_ids_for_table(conn, cursor, "recruitment_drives")
+
 def _run_schema_migrations(conn, cursor, pk_auto, blob_type):
         # 1. Students Table
     cursor.execute(f"""
@@ -3355,7 +3396,8 @@ def _run_schema_migrations(conn, cursor, pk_auto, blob_type):
 
     for col_rd in [
         ("participated_cnics_json", "TEXT"),
-        ("selected_cnics_json", "TEXT")
+        ("selected_cnics_json", "TEXT"),
+        ("approval_doc_blob", blob_type)
     ]:
         try:
             cursor.execute(f"ALTER TABLE recruitment_drives ADD COLUMN IF NOT EXISTS {col_rd[0]} {col_rd[1]}")
@@ -4736,15 +4778,24 @@ elif choice == "Guest Speaker Sessions":
 
     with tab2:
         st.markdown("##### Post-Session: Annexure 'E', Annexure 'F', Honor Certificate & Final Archive")
-        df_lectures = pd.read_sql("SELECT id, speaker_name, topic, lecture_date, status FROM guest_lectures ORDER BY id DESC", conn)
+        _repair_null_ids_for_table(conn, cursor, "guest_lectures")
+        df_lectures = pd.read_sql("SELECT id, speaker_name, topic, lecture_date, status FROM guest_lectures ORDER BY id DESC NULLS LAST, ctid DESC", conn)
         
         if not df_lectures.empty:
-            session_dict = {f"ID {row['id']} - {row['speaker_name']} ({row['topic']}) [{row['status']}]": row['id'] for _, row in df_lectures.iterrows()}
+            _df_valid_gl = df_lectures[df_lectures['id'].notna()].copy()
+            if _df_valid_gl.empty:
+                st.warning("Koi valid ID wala Guest Lecture record nahi mila. Page refresh karein.")
+                st.stop()
+            _df_valid_gl['id'] = _df_valid_gl['id'].astype(int)
+            session_dict = {f"ID {int(row['id'])} - {row['speaker_name']} ({row['topic']}) [{row['status']}]": int(row['id']) for _, row in _df_valid_gl.iterrows()}
             selected_label = st.selectbox("Select Session to Complete:", list(session_dict.keys()))
             selected_id = session_dict[selected_label]
 
             cursor.execute("SELECT * FROM guest_lectures WHERE id = ?", (selected_id,))
             s_row = cursor.fetchone()
+            if not s_row:
+                st.warning("Selected guest lecture record nahi mila. Page refresh karein.")
+                st.stop()
             c_names = [d[0] for d in cursor.description]
             s_data = dict(zip(c_names, s_row))
 
@@ -4842,8 +4893,13 @@ elif choice == "Guest Speaker Sessions":
             st.markdown("###### ⚙️ Manage Archived Session (Re-download Approval, Annexures, Certificate / Edit / Delete)")
             re_id = st.selectbox("Session Select Karein:", df_all['id'].tolist(), format_func=lambda x: f"ID {x} - {df_all.loc[df_all['id']==x, 'speaker_name'].values[0]} ({df_all.loc[df_all['id']==x, 'lecture_date'].values[0]})")
             
+            _repair_null_ids_for_table(conn, cursor, "guest_lectures")
             cursor.execute("SELECT * FROM guest_lectures WHERE id = ?", (re_id,))
-            re_data = dict(zip([d[0] for d in cursor.description], cursor.fetchone()))
+            _gl_arch_row = cursor.fetchone()
+            if not _gl_arch_row:
+                st.warning("Selected archived guest lecture record nahi mila. Page refresh karein.")
+                st.stop()
+            re_data = dict(zip([d[0] for d in cursor.description], _gl_arch_row))
             
             if re_data.get('approval_doc_blob'):
                 re_app_docx = decompress_file_bytes(re_data['approval_doc_blob'])
@@ -5386,7 +5442,15 @@ elif choice == "Recruitment Drive":
     st.subheader("On-Campus Recruitment Drive Management & Documentation")
     
     # Safe Database Column Alterations
-    for col_rd in [("participated_cnics_json", "TEXT"), ("selected_cnics_json", "TEXT")]:
+    try:
+        _curr_db_type = db_type
+    except NameError:
+        try:
+            _, _curr_db_type = get_db_connection()
+        except Exception:
+            _curr_db_type = "postgres"
+    _rd_blob_type = "BYTEA" if _curr_db_type == "postgres" else "BLOB"
+    for col_rd in [("participated_cnics_json", "TEXT"), ("selected_cnics_json", "TEXT"), ("approval_doc_blob", _rd_blob_type)]:
         try:
             cursor.execute(f"ALTER TABLE recruitment_drives ADD COLUMN IF NOT EXISTS {col_rd[0]} {col_rd[1]}")
             conn.commit()
@@ -5622,15 +5686,24 @@ elif choice == "Recruitment Drive":
     # TAB 2: ASSESSMENT, FEEDBACK, BUDGET & FINAL SUBMIT (ANNEX K OPTIONS)
     # -------------------------------------------------------------------------
     with rd_tab2:
-        df_drives = pd.read_sql("SELECT id, company_name, drive_date, session, target_techs, venue, drive_time, status FROM recruitment_drives ORDER BY id DESC", conn)
+        _repair_null_drive_ids(conn, cursor, pl)
+        df_drives = pd.read_sql("SELECT id, company_name, drive_date, session, target_techs, venue, drive_time, status FROM recruitment_drives ORDER BY id DESC NULLS LAST, ctid DESC", conn)
         
         if not df_drives.empty:
-            drive_map = {f"ID {r['id']} - {r['company_name']} ({r['drive_date']}) [{r['status']}]": r['id'] for _, r in df_drives.iterrows()}
+            _df_valid_drives = df_drives[df_drives['id'].notna()].copy()
+            if _df_valid_drives.empty:
+                st.warning("Koi valid ID wali Recruitment Drive nahi mili. Page refresh karein.")
+                st.stop()
+            _df_valid_drives['id'] = _df_valid_drives['id'].astype(int)
+            drive_map = {f"ID {r['id']} - {r['company_name']} ({r['drive_date']}) [{r['status']}]": int(r['id']) for _, r in _df_valid_drives.iterrows()}
             selected_drive_label = st.selectbox("Select Recruitment Drive to Finalize:", list(drive_map.keys()))
             selected_drive_id = drive_map[selected_drive_label]
 
             cursor.execute(f"SELECT * FROM recruitment_drives WHERE id = {pl}", (selected_drive_id,))
             dr_row = cursor.fetchone()
+            if not dr_row:
+                st.warning("Selected recruitment drive record nahi mila (shayad delete ho gaya hai). Page refresh karein.")
+                st.stop()
             dr_cols = [d[0] for d in cursor.description]
             dr_data = dict(zip(dr_cols, dr_row))
             dr_data['target_techs'] = dr_data['target_techs'].split(",") if dr_data['target_techs'] else []
@@ -6203,16 +6276,38 @@ elif choice == "Recruitment Drive":
     # -------------------------------------------------------------------------
     with rd_tab3:
         st.markdown("##### 📂 Permanent Archived Recruitment Drives, Edit & Delete")
-        df_all_drives = pd.read_sql("SELECT id, company_name, drive_date, job_title, target_techs, session, students_appeared, students_shortlisted, budget_utilized, status FROM recruitment_drives ORDER BY id DESC", conn)
+        _repaired_cnt = _repair_null_drive_ids(conn, cursor, pl)
+        if _repaired_cnt > 0:
+            st.info(f"🔧 {_repaired_cnt} drive record(s) with missing ID automatically repaired so you can open, edit, or delete them.")
+        df_all_drives = pd.read_sql("SELECT id, company_name, drive_date, job_title, target_techs, session, students_appeared, students_shortlisted, budget_utilized, status FROM recruitment_drives ORDER BY id DESC NULLS LAST, ctid DESC", conn)
         if not df_all_drives.empty:
             st.dataframe(df_all_drives, use_container_width=True)
             
             st.markdown("---")
             st.markdown("###### ⚙️ Manage Archived Drive (Re-download / Edit / Delete)")
-            re_did = st.selectbox("Archived Drive Select Karein:", df_all_drives['id'].tolist(), format_func=lambda x: f"ID {x} - {df_all_drives.loc[df_all_drives['id']==x, 'company_name'].values[0]} ({df_all_drives.loc[df_all_drives['id']==x, 'drive_date'].values[0]})")
+            _rd_labels_map = {}
+            for _, r in df_all_drives.iterrows():
+                _raw_id = r.get('id')
+                if pd.isna(_raw_id):
+                    continue
+                _did_int = int(float(_raw_id))
+                _comp = r['company_name'] if pd.notna(r.get('company_name')) else "Unknown"
+                _ddate = r['drive_date'] if pd.notna(r.get('drive_date')) else ""
+                _rd_labels_map[_did_int] = f"ID {_did_int} - {_comp} ({_ddate})"
+            _rd_ids = list(_rd_labels_map.keys())
+            re_did = st.selectbox(
+                "Archived Drive Select Karein:",
+                _rd_ids,
+                format_func=lambda x: _rd_labels_map.get(x, f"ID {x}"),
+                key="rd_tab3_archive_select"
+            )
             
             cursor.execute(f"SELECT * FROM recruitment_drives WHERE id = {pl}", (re_did,))
-            archive_dr = dict(zip([d[0] for d in cursor.description], cursor.fetchone()))
+            _arch_row = cursor.fetchone()
+            if not _arch_row:
+                st.warning("Selected archived drive record nahi mila. Page refresh karein.")
+                st.stop()
+            archive_dr = dict(zip([d[0] for d in cursor.description], _arch_row))
             archive_dr['target_techs'] = archive_dr['target_techs'].split(",") if archive_dr['target_techs'] else []
 
             # 1. Roster Candidates
