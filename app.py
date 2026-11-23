@@ -6285,25 +6285,41 @@ elif choice == "Recruitment Drive":
             
             st.markdown("---")
             st.markdown("###### ⚙️ Manage Archived Drive (Re-download / Edit / Delete)")
-            _rd_labels_map = {}
-            for _, r in df_all_drives.iterrows():
+            _rd_option_meta = {}
+            _rd_options = []
+            for _idx_r, r in df_all_drives.iterrows():
                 _raw_id = r.get('id')
-                if pd.isna(_raw_id):
-                    continue
-                _did_int = int(float(_raw_id))
                 _comp = r['company_name'] if pd.notna(r.get('company_name')) else "Unknown"
                 _ddate = r['drive_date'] if pd.notna(r.get('drive_date')) else ""
-                _rd_labels_map[_did_int] = f"ID {_did_int} - {_comp} ({_ddate})"
-            _rd_ids = list(_rd_labels_map.keys())
-            re_did = st.selectbox(
+                if pd.isna(_raw_id):
+                    _opt_key = f"row_{_idx_r}_{_comp}_{_ddate}"
+                    _opt_lbl = f"Row #{_idx_r + 1} (ID None) - {_comp} ({_ddate})"
+                    _rd_option_meta[_opt_key] = {"label": _opt_lbl, "id": None, "company_name": _comp, "drive_date": _ddate}
+                else:
+                    _did_int = int(float(_raw_id))
+                    _opt_key = f"id_{_did_int}_r{_idx_r}"
+                    _opt_lbl = f"ID {_did_int} - {_comp} ({_ddate})"
+                    _rd_option_meta[_opt_key] = {"label": _opt_lbl, "id": _did_int, "company_name": _comp, "drive_date": _ddate}
+                _rd_options.append(_opt_key)
+
+            re_sel_key = st.selectbox(
                 "Archived Drive Select Karein:",
-                _rd_ids,
-                format_func=lambda x: _rd_labels_map.get(x, f"ID {x}"),
+                _rd_options,
+                format_func=lambda k: _rd_option_meta.get(k, {}).get("label", str(k)),
                 key="rd_tab3_archive_select"
             )
-            
-            cursor.execute(f"SELECT * FROM recruitment_drives WHERE id = {pl}", (re_did,))
-            _arch_row = cursor.fetchone()
+            _sel_meta = _rd_option_meta.get(re_sel_key, {})
+            re_did = _sel_meta.get("id")
+
+            if re_did is not None:
+                cursor.execute(f"SELECT * FROM recruitment_drives WHERE id = {pl} LIMIT 1", (re_did,))
+                _arch_row = cursor.fetchone()
+            else:
+                cursor.execute(
+                    f"SELECT * FROM recruitment_drives WHERE id IS NULL AND COALESCE(company_name,'') = {pl} AND COALESCE(drive_date,'') = {pl} LIMIT 1",
+                    (_sel_meta.get("company_name", ""), _sel_meta.get("drive_date", ""))
+                )
+                _arch_row = cursor.fetchone()
             if not _arch_row:
                 st.warning("Selected archived drive record nahi mila. Page refresh karein.")
                 st.stop()
