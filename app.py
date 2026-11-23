@@ -1121,19 +1121,27 @@ def _get_cert_font(size, bold=False, italic=False, sans=False):
     candidates = []
     if sans:
         if bold:
-            candidates += ["arialbd.ttf", "calibrib.ttf", "LiberationSans-Bold.ttf", "DejaVuSans-Bold.ttf"]
+            candidates += ["arialbd.ttf", "calibrib.ttf", "LiberationSans-Bold.ttf", "DejaVuSans-Bold.ttf", "FreeSansBold.ttf"]
         else:
-            candidates += ["arial.ttf", "calibri.ttf", "LiberationSans-Regular.ttf", "DejaVuSans.ttf"]
+            candidates += ["arial.ttf", "calibri.ttf", "LiberationSans-Regular.ttf", "DejaVuSans.ttf", "FreeSans.ttf"]
     else:
         if bold and italic:
-            candidates += ["georgiaz.ttf", "timesbi.ttf", "LiberationSerif-BoldItalic.ttf", "DejaVuSerif-BoldItalic.ttf"]
+            candidates += ["georgiaz.ttf", "timesbi.ttf", "LiberationSerif-BoldItalic.ttf", "DejaVuSerif-BoldItalic.ttf", "FreeSerifBoldItalic.ttf"]
         elif bold:
-            candidates += ["georgiab.ttf", "timesbd.ttf", "LiberationSerif-Bold.ttf", "DejaVuSerif-Bold.ttf"]
+            candidates += ["georgiab.ttf", "timesbd.ttf", "LiberationSerif-Bold.ttf", "DejaVuSerif-Bold.ttf", "FreeSerifBold.ttf"]
         elif italic:
-            candidates += ["georgiai.ttf", "timesi.ttf", "LiberationSerif-Italic.ttf", "DejaVuSerif-Italic.ttf"]
+            candidates += ["georgiai.ttf", "timesi.ttf", "LiberationSerif-Italic.ttf", "DejaVuSerif-Italic.ttf", "FreeSerifItalic.ttf"]
         else:
-            candidates += ["georgia.ttf", "times.ttf", "LiberationSerif-Regular.ttf", "DejaVuSerif.ttf"]
-    search_dirs = ["", "C:/Windows/Fonts", "/usr/share/fonts/truetype/liberation", "/usr/share/fonts/truetype/dejavu", "/usr/share/fonts"]
+            candidates += ["georgia.ttf", "times.ttf", "LiberationSerif-Regular.ttf", "DejaVuSerif.ttf", "FreeSerif.ttf"]
+    search_dirs = [
+        "",
+        "C:/Windows/Fonts",
+        "/usr/share/fonts/truetype/liberation",
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/truetype/freefont",
+        "/usr/share/fonts/truetype/msttcorefonts",
+        "/usr/share/fonts"
+    ]
     for d in search_dirs:
         for c in candidates:
             p = os.path.join(d, c) if d else c
@@ -1141,7 +1149,10 @@ def _get_cert_font(size, bold=False, italic=False, sans=False):
                 return ImageFont.truetype(p, size)
             except Exception:
                 continue
-    return ImageFont.load_default()
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 def _draw_cert_laurel_wreath(draw, cx, cy, radius, color_main=(206, 155, 42), color_hi=(238, 198, 92)):
     for side in (-1, 1):
@@ -1248,10 +1259,11 @@ def generate_guest_speaker_certificate(data, speaker_photo_bytes=None, pri_sig_b
     draw.polygon([(bx1 - 12, by1), (bx2 + 12, by1), (bx2 - 6, by2), (bx1 + 6, by2)], fill=EMERALD_DARK, outline=GOLD_BRIGHT)
     draw.line([(bx1 - 12, by1), (bx2 + 12, by1)], fill=GOLD_BRIGHT, width=4)
     draw.line([(bx1 + 6, by2), (bx2 - 6, by2)], fill=GOLD_BRIGHT, width=4)
-    f_banner = _get_cert_font(40, bold=True)
+    f_banner = _get_cert_font(36, bold=True)
     b_txt = "CERTIFICATE OF APPRECIATION"
     bb = draw.textbbox((0, 0), b_txt, font=f_banner)
-    draw.text(((W - (bb[2] - bb[0])) / 2, by1 + 14), b_txt, fill=(255, 255, 255, 255), font=f_banner)
+    bh = bb[3] - bb[1]
+    draw.text(((W - (bb[2] - bb[0])) / 2 - bb[0], (by1 + by2) / 2 - bh / 2 - bb[1]), b_txt, fill=(255, 255, 255, 255), font=f_banner)
     _draw_cert_star(draw, W // 2, 286, 15, 6, fill=GOLD_DARK)
     draw.line([(W // 2 - 190, 286), (W // 2 - 26, 286)], fill=GOLD_DARK, width=2)
     draw.line([(W // 2 + 26, 286), (W // 2 + 190, 286)], fill=GOLD_DARK, width=2)
@@ -1321,9 +1333,10 @@ def generate_guest_speaker_certificate(data, speaker_photo_bytes=None, pri_sig_b
     draw.polygon([(cx_text - 210, pill_y1), (cx_text + 210, pill_y1), (cx_text + 235, (pill_y1 + pill_y2) // 2), (cx_text + 210, pill_y2), (cx_text - 210, pill_y2), (cx_text - 235, (pill_y1 + pill_y2) // 2)], fill=EMERALD_DARK, outline=GOLD_BRIGHT)
     draw.line([(cx_text - 380, (pill_y1 + pill_y2) // 2), (cx_text - 245, (pill_y1 + pill_y2) // 2)], fill=GOLD_DARK, width=2)
     draw.line([(cx_text + 245, (pill_y1 + pill_y2) // 2), (cx_text + 380, (pill_y1 + pill_y2) // 2)], fill=GOLD_DARK, width=2)
-    f_pill = _get_cert_font(34, bold=True, italic=True)
+    f_pill = _get_cert_font(30, bold=True, italic=True)
     pb = draw.textbbox((0, 0), "Guest Speaker", font=f_pill)
-    draw.text((cx_text - (pb[2] - pb[0]) / 2, pill_y1 + 8), "Guest Speaker", fill=(255, 255, 255, 255), font=f_pill)
+    ph = pb[3] - pb[1]
+    draw.text((cx_text - (pb[2] - pb[0]) / 2 - pb[0], (pill_y1 + pill_y2) / 2 - ph / 2 - pb[1]), "Guest Speaker", fill=(255, 255, 255, 255), font=f_pill)
     desig = str(data.get("designation") or "").strip()
     org = str(data.get("company_org") or data.get("org") or "").strip()
     topic = str(data.get("topic") or "").strip()
@@ -1344,8 +1357,9 @@ def generate_guest_speaker_certificate(data, speaker_photo_bytes=None, pri_sig_b
             topic_line = 'Topic: "' + topic + '"  |  Date: ' + lec_date
         else:
             topic_line = 'Topic: "' + topic + '"'
-        y_cur = draw_centered_text(y_cur + 2, topic_line, _get_cert_font(22, bold=True), fill=EMERALD_DARK, max_width=1040)
-    y_cur = draw_centered_text(y_cur + 2, "We deeply appreciate " + p_word + " time, expertise and inspiring insights", f_body, fill=(25, 30, 28, 255), max_width=1040)
+        y_cur = draw_centered_text(y_cur + 6, topic_line, _get_cert_font(22, bold=True), fill=EMERALD_DARK, max_width=1020)
+        y_cur += 8
+    y_cur = draw_centered_text(y_cur + 4, "We deeply appreciate " + p_word + " time, expertise and inspiring insights", f_body, fill=(25, 30, 28, 255), max_width=1040)
     y_cur = draw_centered_text(y_cur - 4, "for the benefit of our students and faculty.", f_body, fill=(25, 30, 28, 255), max_width=1040)
     _draw_cert_star(draw, W // 2 + 120, 775, 13, 5, fill=GOLD_DARK)
     seal_x, seal_y, seal_r = W // 2, 875, 84
