@@ -84,6 +84,77 @@ class PgCompatCursor:
             except Exception:
                 pass
 
+    def _raw_pg_conn(self):
+        if self._conn is None:
+            return None
+        raw = getattr(self._conn, "_conn", self._conn)
+        if getattr(raw, "closed", 1) != 0 and hasattr(self._conn, "_ensure_open"):
+            self._conn._ensure_open()
+            raw = getattr(self._conn, "_conn", self._conn)
+        return raw
+
+    def _dedup_students_batch(self, pg_q, clean_seq):
+        if not clean_seq or "students" not in pg_q.lower() or "ON CONFLICT" not in pg_q.upper():
+            return clean_seq
+        is_do_nothing = "DO NOTHING" in pg_q.upper()
+        seen_idx = {}
+        deduped = []
+        for row in clean_seq:
+            if not row:
+                continue
+            cnic_key = str(row[0]).strip()
+            if not cnic_key:
+                continue
+            if cnic_key not in seen_idx:
+                seen_idx[cnic_key] = len(deduped)
+                deduped.append(row)
+            else:
+                if not is_do_nothing:
+                    deduped[seen_idx[cnic_key]] = row
+        return deduped
+
+    def _ensure_students_cnic_unique(self):
+        raw = self._raw_pg_conn()
+        if raw is None or getattr(raw, "closed", 1) != 0:
+            return False
+        try:
+            try:
+                raw.rollback()
+            except Exception:
+                pass
+            rcur = raw.cursor()
+            rcur.execute("""
+                DELETE FROM students a
+                USING students b
+                WHERE a.ctid < b.ctid
+                  AND a.cnic = b.cnic
+            """)
+            try:
+                rcur.execute("ALTER TABLE students ALTER COLUMN cnic SET NOT NULL")
+            except Exception:
+                raw.rollback()
+                rcur = raw.cursor()
+            try:
+                rcur.execute("ALTER TABLE students ADD CONSTRAINT students_cnic_key UNIQUE (cnic)")
+            except Exception:
+                raw.rollback()
+                rcur = raw.cursor()
+                rcur.execute("CREATE UNIQUE INDEX IF NOT EXISTS students_cnic_uidx ON students (cnic)")
+            raw.commit()
+            rcur.close()
+            self._cur = raw.cursor()
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            try:
+                raw.rollback()
+            except Exception:
+                pass
+            return False
+
     def execute(self, query, params=None):
         pg_q = _translate_sql_for_pg(query)
         self._rollback_if_in_error()
@@ -95,21 +166,52 @@ class PgCompatCursor:
                 )
                 return self._cur.execute(pg_q, clean_params)
             return self._cur.execute(pg_q)
-        except Exception:
+        except Exception as err:
             self._safe_rollback()
+            if "no unique or exclusion constraint matching the ON CONFLICT specification" in str(err) and "students" in pg_q.lower():
+                if self._ensure_students_cnic_unique():
+                    if params is not None:
+                        clean_params = tuple(
+                            psycopg2.Binary(p) if isinstance(p, (bytes, bytearray, memoryview)) else p
+                            for p in params
+                        )
+                        return self._cur.execute(pg_q, clean_params)
+                    return self._cur.execute(pg_q)
             raise
 
     def executemany(self, query, seq_of_params):
         pg_q = _translate_sql_for_pg(query)
         self._rollback_if_in_error()
+        clean_seq = [
+            tuple(psycopg2.Binary(p) if isinstance(p, (bytes, bytearray, memoryview)) else p for p in row)
+            for row in seq_of_params
+        ]
+        batch = self._dedup_students_batch(pg_q, clean_seq)
         try:
-            clean_seq = [
-                tuple(psycopg2.Binary(p) if isinstance(p, (bytes, bytearray, memoryview)) else p for p in row)
-                for row in seq_of_params
-            ]
-            return self._cur.executemany(pg_q, clean_seq)
-        except Exception:
+            return self._cur.executemany(pg_q, batch)
+        except Exception as err:
             self._safe_rollback()
+            if "no unique or exclusion constraint matching the ON CONFLICT specification" in str(err) and "students" in pg_q.lower():
+                if self._ensure_students_cnic_unique():
+                    try:
+                        return self._cur.executemany(pg_q, batch)
+                    except Exception:
+                        self._safe_rollback()
+                # Direct fallback if constraint still cannot be created on table
+                is_do_nothing = "DO NOTHING" in pg_q.upper()
+                for row in batch:
+                    if not row:
+                        continue
+                    cnic_val = str(row[0]).strip()
+                    self._cur.execute("SELECT 1 FROM students WHERE cnic = %s LIMIT 1", (cnic_val,))
+                    exists = self._cur.fetchone() is not None
+                    if exists:
+                        if is_do_nothing:
+                            continue
+                        self._cur.execute("DELETE FROM students WHERE cnic = %s", (cnic_val,))
+                    ins_q = pg_q.split("ON CONFLICT")[0].strip()
+                    self._cur.execute(ins_q, row)
+                return
             raise
 
     def fetchone(self):
@@ -4483,9 +4585,11 @@ elif choice == "Student Directory":
                         with st.spinner(f"Importing {len(uploaded_df):,} records... please wait."):
                             records_to_insert = []
                             uploaded_cnics = []
-                            for _, row in uploaded_df.iterrows():
+                            invalid_cnics = []
+                            for idx_r, row in uploaded_df.iterrows():
                                 r_name = str(row[col_map['name']]).strip() if pd.notna(row[col_map['name']]) else ""
-                                r_cnic = str(row[col_map['cnic']]).strip() if pd.notna(row[col_map['cnic']]) else ""
+                                r_cnic_raw = str(row[col_map['cnic']]).strip() if pd.notna(row[col_map['cnic']]) else ""
+                                r_cnic = normalize_cnic(r_cnic_raw)
                                 r_phone = str(row[col_map['mobile number']]).strip() if pd.notna(row[col_map['mobile number']]) else ""
                                 r_email = str(row[col_map['email']]).strip() if pd.notna(row[col_map['email']]) else ""
                                 r_session = str(row[col_map['session']]).strip() if pd.notna(row[col_map['session']]) else ""
@@ -4495,50 +4599,79 @@ elif choice == "Student Directory":
                                 r_comp = str(row[col_map.get('placed company', '')]).strip() if ('placed company' in col_map and pd.notna(row[col_map['placed company']])) else ""
                                 r_sal = str(row[col_map.get('salary', '')]).strip() if ('salary' in col_map and pd.notna(row[col_map['salary']])) else ""
 
-                                if r_cnic and r_name:
-                                    records_to_insert.append((r_cnic, r_roll, r_name, r_tech, r_session, r_phone, r_email, r_status, r_comp, r_sal))
-                                    uploaded_cnics.append(r_cnic)
+                                if r_name:
+                                    if r_cnic:
+                                        records_to_insert.append((r_cnic, r_roll, r_name, r_tech, r_session, r_phone, r_email, r_status, r_comp, r_sal))
+                                        uploaded_cnics.append(r_cnic)
+                                    else:
+                                        invalid_cnics.append(f"Row {idx_r + 2}: '{r_cnic_raw}' ({r_name})")
+
+                            if invalid_cnics:
+                                st.warning(
+                                    f"⚠️ {len(invalid_cnics)} rows ka CNIC format valid nahi tha (13 digits / XXXXX-XXXXXXX-X zaroori hai), unhein skip kiya gaya: "
+                                    + ", ".join(invalid_cnics[:10])
+                                    + ("..." if len(invalid_cnics) > 10 else "")
+                                )
 
                             cursor.execute("SELECT COUNT(*) FROM students")
                             b_cnt = cursor.fetchone()[0]
 
-                            if upload_mode == "🛡️ Sirf Naye Students Add Karein (Purana Data Mehfooz / Skip Duplicates)":
-                                cursor.executemany("""
-                                    INSERT OR IGNORE INTO students 
-                                    (cnic, roll_no, name, technology, session, phone, email, status, placed_company, placed_salary) 
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """, records_to_insert)
-                                conn.commit()
+                            # Clean plain INSERT/UPDATE workflow so it never depends on ON CONFLICT constraint
+                            skip_dups = (upload_mode == "🛡️ Sirf Naye Students Add Karein (Purana Data Mehfooz / Skip Duplicates)")
+                            existing_set = set()
+                            if uploaded_cnics:
+                                chunk_size = 500
+                                for i in range(0, len(uploaded_cnics), chunk_size):
+                                    c_chunk = uploaded_cnics[i:i+chunk_size]
+                                    pl_h = ",".join("?" * len(c_chunk))
+                                    cursor.execute(f"SELECT cnic FROM students WHERE cnic IN ({pl_h})", c_chunk)
+                                    for r_ex in cursor.fetchall():
+                                        if r_ex and r_ex[0]:
+                                            existing_set.add(str(r_ex[0]).strip())
 
-                                cursor.execute("SELECT COUNT(*) FROM students")
-                                a_cnt = cursor.fetchone()[0]
-                                added = a_cnt - b_cnt
-                                skipped = len(records_to_insert) - added
-                                st.success(f"Mukammal! Kul Database: **{a_cnt:,}** | Naye Add Huay: **{added:,}** | Pehle se mojood (Skipped): **{skipped:,}**")
+                            seen_in_file = set()
+                            added_now = 0
+                            updated_now = 0
+                            skipped_now = 0
 
+                            for rec in records_to_insert:
+                                r_cnic, r_roll, r_name, r_tech, r_session, r_phone, r_email, r_status, r_comp, r_sal = rec
+                                c_key = str(r_cnic).strip()
+                                if not c_key:
+                                    continue
+
+                                if c_key in seen_in_file:
+                                    skipped_now += 1
+                                    continue
+                                seen_in_file.add(c_key)
+
+                                if c_key in existing_set:
+                                    if skip_dups:
+                                        skipped_now += 1
+                                    else:
+                                        cursor.execute("""
+                                            UPDATE students
+                                            SET roll_no = ?, name = ?, technology = ?, session = ?, phone = ?, email = ?, status = ?, placed_company = ?, placed_salary = ?
+                                            WHERE cnic = ?
+                                        """, (r_roll, r_name, r_tech, r_session, r_phone, r_email, r_status, r_comp, r_sal, c_key))
+                                        updated_now += 1
+                                else:
+                                    cursor.execute("""
+                                        INSERT INTO students
+                                        (cnic, roll_no, name, technology, session, phone, email, status, placed_company, placed_salary)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """, (c_key, r_roll, r_name, r_tech, r_session, r_phone, r_email, r_status, r_comp, r_sal))
+                                    existing_set.add(c_key)
+                                    added_now += 1
+
+                            conn.commit()
+                            cursor.execute("SELECT COUNT(*) FROM students")
+                            a_cnt = cursor.fetchone()[0]
+
+                            if skip_dups:
+                                st.success(f"Mukammal! Kul Database: **{a_cnt:,}** | Naye Add Huay: **{added_now:,}** | Pehle se mojood (Skipped): **{skipped_now:,}**")
                             else:
-                                existing_matched = 0
-                                if uploaded_cnics:
-                                    chunk_size = 500
-                                    for i in range(0, len(uploaded_cnics), chunk_size):
-                                        c_chunk = uploaded_cnics[i:i+chunk_size]
-                                        pl_h = ",".join("?" * len(c_chunk))
-                                        cursor.execute(f"SELECT COUNT(*) FROM students WHERE cnic IN ({pl_h})", c_chunk)
-                                        existing_matched += cursor.fetchone()[0]
-
-                                cursor.executemany("""
-                                    INSERT OR REPLACE INTO students 
-                                    (cnic, roll_no, name, technology, session, phone, email, status, placed_company, placed_salary) 
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """, records_to_insert)
-                                conn.commit()
-
-                                cursor.execute("SELECT COUNT(*) FROM students")
-                                a_cnt = cursor.fetchone()[0]
-                                added = a_cnt - b_cnt
-                                updated_cnt = existing_matched
-
-                                st.success(f"Mukammal! Naye Add Huay: **{added:,}** | Pehle se mojood jo Update/Replace huay: **{updated_cnt:,}** | Kul Database: **{a_cnt:,}**")
+                                st.success(f"Mukammal! Naye Add Huay: **{added_now:,}** | Pehle se mojood jo Update/Replace huay: **{updated_now:,}** | Kul Database: **{a_cnt:,}**")
             except Exception as e:
                 st.error(f"File process karne mein masla aaya: {e}")
 
